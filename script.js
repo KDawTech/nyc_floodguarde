@@ -25,6 +25,7 @@
  *      - Full Create, Read, Update, Delete (CRUD) for stations and alert rules.
  * ============================================================================
  */
+import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient.js';
 
 (function () {
   'use strict';
@@ -319,6 +320,15 @@
    * 3. APPLICATION STATE & HELPER FUNCTIONS
    * -------------------------------------------------------------------------- */
   const appState = FloodGuardAPI.loadState();
+  const supabaseState = {
+    status: 'connecting', // 'connecting' | 'connected' | 'offline' | 'error' | 'unconfigured'
+    errorMessage: '',
+    diagnostics: getSupabaseDiagnostics(),
+    lastFetchedMs: null,
+    latencyMs: null,
+    sensors: [],
+    readings: []
+  };
   let activeView = 'home';
   let selectedMapStationId = appState.stations[0] ? appState.stations[0].id : null;
   let pendingDeleteStationId = null;
@@ -328,6 +338,16 @@
   let countdownSec = appState.config.pollIntervalSec || 5;
   let lastLatencyMs = 118;
   let tickTimerId = null;
+  let supabasePollTimerId = null;
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
 
   function evaluateStationStatus(station, depthValIn, lastUpdatedMs, staleTimeoutSec) {
     const now = Date.now();
@@ -489,6 +509,8 @@
     synchronizeAlerts(false);
     updateRoleUI();
     renderTopStatusAndTicker();
+    renderSupabaseStatusBar();
+    renderSupabasePanel();
     renderHomepage();
     renderDashboard();
     renderMap();
@@ -541,6 +563,324 @@
     }
     if (netBanner) {
       netBanner.classList.toggle('active', isOffline);
+    }
+  }
+
+  /* --------------------------------------------------------------------------
+   * 6B. SUPABASE READ-ONLY CONNECTION, PANEL & TAGGED CARD RENDERING
+   * -------------------------------------------------------------------------- */
+  function getSupabaseThresholdStatus(sensor) {
+    if (typeof sensor.waterLevelIn !== 'number' || Number.isNaN(sensor.waterLevelIn)) {
+      return 'NORMAL';
+    }
+    return sensor.waterLevelIn >= sensor.alertThresholdIn ? 'WARNING' : 'NORMAL';
+  }
+
+  function renderSupabaseStatusBar() {
+    const dot = document.getElementById('supabaseStatusDot');
+    const label = document.getElementById('supabaseStatusLabel');
+    const badge = document.getElementById('supabasePanelStatusBadge');
+    const syncTxt = document.getElementById('supabaseLastSyncText');
+    const isOffline = simulatedOffline || !navigator.onLine;
+    const effectiveStatus = isOffline ? 'offline' : supabaseState.status;
+
+    if (dot) {
+      dot.classList.remove('offline', 'connecting', 'error');
+      if (effectiveStatus === 'offline') dot.classList.add('offline');
+      else if (effectiveStatus === 'connecting') dot.classList.add('connecting');
+      else if (effectiveStatus === 'error' || effectiveStatus === 'unconfigured') dot.classList.add('error');
+    }
+
+    const pill = document.getElementById('supabaseStatusPill');
+    if (pill) {
+      pill.title = supabaseState.errorMessage
+        ? `Supabase Error: ${supabaseState.errorMessage}`
+        : `Supabase Host: ${supabaseState.diagnostics?.hostLabel || 'unknown'} (RLS Read-Only)`;
+    }
+
+    if (label) {
+      if (effectiveStatus === 'connected') {
+        const lat = supabaseState.latencyMs ? ` (${supabaseState.latencyMs} ms)` : '';
+        label.textContent = `Supabase: Connected${lat}`;
+      } else if (effectiveStatus === 'connecting') {
+        label.textContent = 'Supabase: Connecting...';
+      } else if (effectiveStatus === 'offline') {
+        label.textContent = supabaseState.sensors.length > 0 ? 'Supabase: Offline (Cached)' : 'Supabase: Offline';
+      } else if (effectiveStatus === 'unconfigured') {
+        label.textContent = 'Supabase: Env Vars Missing';
+      } else {
+        label.textContent = 'Supabase: Error (See Dashboard)';
+      }
+    }
+
+    if (badge) {
+      badge.className = 'status-badge';
+      if (effectiveStatus === 'connected') {
+        badge.classList.add('badge-normal');
+        badge.textContent = `Connected • ${supabaseState.sensors.length} Sensor / ${supabaseState.readings.length} Reading`;
+      } else if (effectiveStatus === 'connecting') {
+        badge.classList.add('badge-stale');
+        badge.textContent = 'Connecting...';
+      } else if (effectiveStatus === 'offline') {
+        badge.classList.add('badge-warning');
+        badge.textContent = 'Offline (Cached Read-Only)';
+      } else if (effectiveStatus === 'unconfigured') {
+        badge.classList.add('badge-critical');
+        badge.textContent = 'Missing Env Config';
+      } else {
+        badge.classList.add('badge-critical');
+        badge.textContent = 'Connection Error';
+      }
+    }
+
+    if (syncTxt) {
+      syncTxt.textContent = supabaseState.lastFetchedMs
+        ? `Last synced: ${new Date(supabaseState.lastFetchedMs).toLocaleTimeString()}`
+        : effectiveStatus === 'error' || effectiveStatus === 'unconfigured'
+        ? 'Sync failed'
+        : 'Not synced yet';
+    }
+  }
+
+  function renderSupabasePanel() {
+    const body = document.getElementById('supabasePanelBody');
+    if (!body) return;
+
+    const diag = supabaseState.diagnostics || getSupabaseDiagnostics();
+
+    if (supabaseState.status === 'connecting' && supabaseState.sensors.length === 0) {
+      body.innerHTML = `<p style="font-size:0.85rem;color:var(--gray-500);">Querying Supabase <code>sensors</code> and <code>water_readings</code> (read-only)...</p>`;
+      return;
+    }
+
+    if ((supabaseState.status === 'error' || supabaseState.status === 'unconfigured') && supabaseState.sensors.length === 0) {
+      body.innerHTML = `
+        <div class="station-guidance guidance-critical" style="margin-bottom:10px;">
+          <strong>Supabase Connection Error:</strong> ${escapeHtml(supabaseState.errorMessage || 'Check RLS read policy and project configuration.')}
+        </div>
+        <div style="font-size:0.78rem;font-family:var(--font-mono);color:var(--gray-600);background:var(--gray-50);border:1px solid var(--gray-200);border-radius:6px;padding:10px;">
+          VITE_SUPABASE_URL: <strong>${diag.hasUrl ? escapeHtml(diag.hostLabel) : 'MISSING'}</strong>
+          ${diag.urlCorrectedFromMissingH ? ' (auto-corrected missing "h" from ttps://)' : ''} •
+          VITE_SUPABASE_PUBLISHABLE_KEY: <strong>${diag.hasKey ? escapeHtml(diag.keyPrefix) : 'MISSING'}</strong>
+        </div>
+      `;
+      return;
+    }
+
+    if (supabaseState.sensors.length === 0) {
+      body.innerHTML = `<p style="font-size:0.85rem;color:var(--gray-500);">Connected to Supabase, but no rows were returned from the <code>sensors</code> table.</p>`;
+      return;
+    }
+
+    const sensorCardsHtml = supabaseState.sensors
+      .map((sensor) => {
+        const hasReading = typeof sensor.waterLevelIn === 'number' && !Number.isNaN(sensor.waterLevelIn);
+        const threshStatus = getSupabaseThresholdStatus(sensor);
+        const recordedStr = sensor.recordedAt ? new Date(sensor.recordedAt).toLocaleString() : 'No saved timestamp';
+        const coordsStr =
+          sensor.latitude != null && sensor.longitude != null
+            ? `${Number(sensor.latitude).toFixed(4)}, ${Number(sensor.longitude).toFixed(4)}`
+            : 'N/A';
+
+        return `
+          <div class="supabase-sensor-box">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+              <div>
+                <span class="borough-chip">Sensor ID #${escapeHtml(sensor.id)} • ${escapeHtml(sensor.location)}</span>
+                <h4 style="font-size:1.05rem;font-weight:800;color:var(--navy-900);">${escapeHtml(sensor.name)}</h4>
+              </div>
+              <span class="status-badge ${threshStatus === 'WARNING' ? 'badge-warning' : 'badge-normal'}">
+                ${threshStatus === 'WARNING' ? 'Above Alert Threshold' : 'Within Threshold'}
+              </span>
+            </div>
+
+            <div class="water-gauge-row" style="margin-bottom:10px;">
+              <div>
+                <div class="water-depth-primary">${hasReading ? formatDepth(sensor.waterLevelIn) : 'No reading'}</div>
+                <div class="water-depth-sub">
+                  ${
+                    hasReading
+                      ? appState.config.unit === 'IN'
+                        ? `${(sensor.waterLevelIn * 2.54).toFixed(1)} cm`
+                        : `${sensor.waterLevelIn.toFixed(1)} in`
+                      : 'Awaiting water_readings row'
+                  }
+                  ${sensor.isSimulatedReading ? ' • Saved as Simulated Reading' : ''}
+                </div>
+              </div>
+              <div style="text-align:right;font-size:0.76rem;color:var(--gray-600);font-family:var(--font-mono);">
+                <div>Alert Threshold: <strong>${formatDepth(sensor.alertThresholdIn)}</strong></div>
+                <div>DB Status: <strong>${escapeHtml(sensor.dbStatus)}</strong></div>
+              </div>
+            </div>
+
+            <div class="supabase-meta-grid">
+              <div class="supabase-meta-item">
+                <div style="color:var(--gray-500);font-size:0.7rem;">Coordinates</div>
+                <strong style="font-family:var(--font-mono);">${escapeHtml(coordsStr)}</strong>
+              </div>
+              <div class="supabase-meta-item">
+                <div style="color:var(--gray-500);font-size:0.7rem;">Latest Reading Timestamp</div>
+                <strong style="font-family:var(--font-mono);font-size:0.72rem;">${escapeHtml(recordedStr)}</strong>
+              </div>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    const sensorNameById = new Map(supabaseState.sensors.map((s) => [s.id, s.name]));
+    const readingsRowsHtml =
+      supabaseState.readings.length > 0
+        ? supabaseState.readings
+            .slice(0, 6)
+            .map((r) => {
+              const sName = sensorNameById.get(r.sensorId) || `Sensor #${r.sensorId}`;
+              return `
+                <tr>
+                  <td style="font-family:var(--font-mono);">#${escapeHtml(r.id)}</td>
+                  <td><strong>${escapeHtml(sName)}</strong></td>
+                  <td class="num-col"><strong>${formatDualDepth(r.waterLevelIn)}</strong></td>
+                  <td>${r.isSimulated ? '<span class="status-badge badge-stale">Simulated Row</span>' : '<span class="status-badge badge-normal">Hardware</span>'}</td>
+                  <td style="font-family:var(--font-mono);font-size:0.75rem;">${r.recordedAt ? escapeHtml(new Date(r.recordedAt).toLocaleString()) : '—'}</td>
+                </tr>
+              `;
+            })
+            .join('')
+        : `<tr><td colspan="5" style="text-align:center;color:var(--gray-500);">No rows found in water_readings.</td></tr>`;
+
+    body.innerHTML = `
+      <div class="supabase-sensor-grid">
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          ${sensorCardsHtml}
+        </div>
+        <div class="table-card">
+          <div style="padding:10px 14px;border-bottom:1px solid var(--gray-200);font-size:0.82rem;font-weight:800;color:var(--navy-900);">
+            Recent <code>water_readings</code> Rows (Read-Only)
+          </div>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Sensor</th>
+                  <th class="num-col">Water Level</th>
+                  <th>Origin</th>
+                  <th>Recorded At</th>
+                </tr>
+              </thead>
+              <tbody>${readingsRowsHtml}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function buildSupabaseStationCardHTML(sensor) {
+    const hasReading = typeof sensor.waterLevelIn === 'number' && !Number.isNaN(sensor.waterLevelIn);
+    const depthIn = hasReading ? sensor.waterLevelIn : 0;
+    const threshStatus = getSupabaseThresholdStatus(sensor);
+    const pct = Math.min(100, Math.max(4, Math.round((depthIn / Math.max(1, sensor.alertThresholdIn * 1.25)) * 100)));
+    const depthCm = (depthIn * 2.54).toFixed(1);
+    const recordedText = sensor.recordedAt ? new Date(sensor.recordedAt).toLocaleString() : 'No reading timestamp';
+    const coordsText =
+      sensor.latitude != null && sensor.longitude != null
+        ? `${Number(sensor.latitude).toFixed(4)}, ${Number(sensor.longitude).toFixed(4)}`
+        : 'NYC';
+
+    return `
+      <article class="station-card station-supabase ${threshStatus === 'WARNING' ? 'status-warning' : 'status-normal'}" data-supabase-sensor-id="${escapeHtml(sensor.id)}">
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+            <span class="badge-db">Supabase DB • Read-Only</span>
+            <span style="font-size:0.72rem;font-family:var(--font-mono);color:var(--gray-500);">ID #${escapeHtml(sensor.id)} • DB: ${escapeHtml(sensor.dbStatus)}</span>
+          </div>
+          <div class="station-card-top">
+            <div>
+              <span class="borough-chip">${escapeHtml(sensor.borough)}</span>
+              <h3 class="station-name">${escapeHtml(sensor.name)}</h3>
+              <div class="station-street">${escapeHtml(sensor.location)} (${escapeHtml(coordsText)})</div>
+            </div>
+            <span class="status-badge ${threshStatus === 'WARNING' ? 'badge-warning' : 'badge-normal'}">
+              ${threshStatus === 'WARNING' ? 'Threshold Exceeded' : 'Normal / Safe'}
+            </span>
+          </div>
+
+          <div class="water-gauge-row">
+            <div>
+              <div class="water-depth-primary">${hasReading ? formatDepth(depthIn) : '—'}</div>
+              <div class="water-depth-sub">
+                ${hasReading ? (appState.config.unit === 'IN' ? `${depthCm} cm` : `${depthIn.toFixed(1)} in`) : 'No reading'}
+                ${sensor.isSimulatedReading ? ' • DB Simulated' : ''}
+              </div>
+            </div>
+            <div class="gauge-track-wrap">
+              <div class="gauge-track" role="progressbar" aria-valuenow="${depthIn}" aria-valuemin="0" aria-valuemax="${sensor.alertThresholdIn}">
+                <div class="gauge-fill ${threshStatus === 'WARNING' ? 'fill-warning' : ''}" style="width:${pct}%;"></div>
+              </div>
+              <div class="gauge-thresholds-label">
+                <span>Alert: ${formatDepth(sensor.alertThresholdIn)}</span>
+                <span>RLS Read-Only</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="station-guidance ${threshStatus === 'WARNING' ? 'guidance-warning' : ''}">
+            Persisted Supabase reading from <code>sensors</code> &amp; <code>water_readings</code>. Kept independent from local 5s simulation and CRUD controls.
+          </div>
+        </div>
+
+        <div class="station-meta-footer">
+          <span>Recorded: <strong>${escapeHtml(recordedText)}</strong></span>
+          <span style="font-family:var(--font-mono);font-size:0.72rem;color:var(--cyan-600);font-weight:700;">Cloud DB Record</span>
+        </div>
+      </article>
+    `;
+  }
+
+  async function loadSupabaseData(showToastOnResult) {
+    const isOffline = simulatedOffline || !navigator.onLine;
+    if (isOffline) {
+      supabaseState.status = 'offline';
+      renderSupabaseStatusBar();
+      renderSupabasePanel();
+      return;
+    }
+
+    if (supabaseState.sensors.length === 0) {
+      supabaseState.status = 'connecting';
+      renderSupabaseStatusBar();
+      renderSupabasePanel();
+    }
+
+    try {
+      const result = await fetchSupabaseFloodData();
+      supabaseState.status = result.status;
+      supabaseState.errorMessage = result.errorMessage || '';
+      supabaseState.diagnostics = result.diagnostics || getSupabaseDiagnostics();
+      supabaseState.latencyMs = result.latencyMs;
+
+      if (result.status === 'connected') {
+        supabaseState.sensors = result.sensors;
+        supabaseState.readings = result.readings;
+        supabaseState.lastFetchedMs = result.fetchedAtMs;
+        if (showToastOnResult) {
+          showToast(`Synced ${result.sensors.length} sensor(s) and ${result.readings.length} reading(s) from Supabase`, 'NORMAL');
+        }
+      } else if (showToastOnResult) {
+        showToast(`Supabase sync issue: ${result.errorMessage}`, 'WARNING');
+      }
+    } catch (err) {
+      supabaseState.status = 'error';
+      supabaseState.errorMessage = err instanceof Error ? err.message : 'Unexpected error connecting to Supabase.';
+      if (showToastOnResult) {
+        showToast(`Supabase error: ${supabaseState.errorMessage}`, 'CRITICAL');
+      }
+    } finally {
+      renderSupabaseStatusBar();
+      renderSupabasePanel();
+      renderDashboard();
     }
   }
 
@@ -763,12 +1103,27 @@
       return b.waterDepthIn - a.waterDepthIn;
     });
 
+    const filteredSupabaseSensors = supabaseState.sensors.filter((sensor) => {
+      const dbThreshStatus = getSupabaseThresholdStatus(sensor);
+      const matchesSearch =
+        !searchVal ||
+        sensor.name.toLowerCase().includes(searchVal) ||
+        sensor.location.toLowerCase().includes(searchVal) ||
+        sensor.borough.toLowerCase().includes(searchVal) ||
+        String(sensor.id).includes(searchVal);
+      const matchesBorough = boroughVal === 'ALL' || sensor.borough === boroughVal;
+      const matchesStatus = statusVal === 'ALL' || dbThreshStatus === statusVal;
+      return matchesSearch && matchesBorough && matchesStatus;
+    });
+
     const grid = document.getElementById('dashboardStationsGrid');
     if (grid) {
-      if (filtered.length === 0) {
+      const supabaseCardsHtml = filteredSupabaseSensors.map(buildSupabaseStationCardHTML).join('');
+      const simulatedCardsHtml = filtered.map(buildStationCardHTML).join('');
+      if (!supabaseCardsHtml && !simulatedCardsHtml) {
         grid.innerHTML = `<div class="form-card" style="grid-column:1/-1;text-align:center;color:var(--gray-500);">No monitoring stations match your current filter criteria.</div>`;
       } else {
-        grid.innerHTML = filtered.map(buildStationCardHTML).join('');
+        grid.innerHTML = supabaseCardsHtml + simulatedCardsHtml;
       }
     }
   }
@@ -1541,6 +1896,9 @@
         simulatedOffline = !simulatedOffline;
         netBtn.textContent = simulatedOffline ? 'Restore Online Mode' : 'Simulate Offline Drop';
         renderAll();
+        if (!simulatedOffline && navigator.onLine) {
+          loadSupabaseData(false);
+        }
         showToast(
           simulatedOffline
             ? 'Simulated temporary internet interruption — running on cached telemetry'
@@ -1554,7 +1912,12 @@
       simulatedOffline = false;
       if (netBtn) netBtn.textContent = 'Simulate Offline Drop';
       stepTelemetrySimulation();
+      loadSupabaseData(false);
       showToast('Connection restored and sensor telemetry synchronized', 'NORMAL');
+    });
+
+    document.getElementById('btnRefreshSupabase')?.addEventListener('click', () => {
+      loadSupabaseData(true);
     });
 
     const pauseBtn = document.getElementById('btnPauseTelemetry');
@@ -2032,8 +2395,15 @@
     window.addEventListener('resize', () => {
       if (activeView === 'charts') renderAllCharts();
     });
-    window.addEventListener('online', renderTopStatusAndTicker);
-    window.addEventListener('offline', renderTopStatusAndTicker);
+    window.addEventListener('online', () => {
+      renderTopStatusAndTicker();
+      loadSupabaseData(false);
+    });
+    window.addEventListener('offline', () => {
+      renderTopStatusAndTicker();
+      renderSupabaseStatusBar();
+      renderSupabasePanel();
+    });
   }
 
   /* --------------------------------------------------------------------------
@@ -2045,6 +2415,13 @@
     updateUltrasonicCalculator();
     renderAll();
     startTelemetryTicker();
+    loadSupabaseData(false);
+    if (supabasePollTimerId) clearInterval(supabasePollTimerId);
+    supabasePollTimerId = setInterval(() => {
+      if (!simulatedOffline && navigator.onLine) {
+        loadSupabaseData(false);
+      }
+    }, 30000);
   }
 
   if (document.readyState === 'loading') {

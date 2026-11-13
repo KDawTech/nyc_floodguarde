@@ -30,6 +30,10 @@
           <span id="telemetryDot" class="pulse-dot"></span>
           <span id="telemetryModeLabel">Gateway: SIMULATED_LOCAL</span>
         </span>
+        <span class="status-pill" id="supabaseStatusPill" title="Read-only Supabase connection status (RLS enabled)">
+          <span id="supabaseStatusDot" class="pulse-dot connecting"></span>
+          <span id="supabaseStatusLabel">Supabase: Connecting...</span>
+        </span>
         <span class="status-pill">Latency: <strong id="telemetryLatencyValue">118 ms</strong> (&lt;5s target)</span>
         <span class="status-pill">Next Poll: <strong id="telemetryCountdownValue">5s</strong></span>
       </div>
@@ -329,6 +333,31 @@
           <button type="button" id="btnExportTelemetryCsv" class="btn btn-sm btn-primary">Export Live Snapshot (CSV)</button>
         </div>
       </div>
+
+      <!-- Dedicated Live Supabase Database Feed Panel (Read-Only, Separate from Local Simulation) -->
+      <section id="supabaseLivePanel" class="form-card supabase-panel" aria-labelledby="supabasePanelHeading">
+        <div class="supabase-panel-header">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+              <span class="badge-db">Supabase Live Database • Read-Only (RLS)</span>
+              <span id="supabasePanelStatusBadge" class="status-badge badge-stale">Connecting...</span>
+            </div>
+            <h3 id="supabasePanelHeading" style="font-size:1.05rem;font-weight:800;color:var(--navy-900);">
+              Persisted Cloud Sensors &amp; Water Readings
+            </h3>
+            <p style="font-size:0.8rem;color:var(--gray-600);">
+              Live read-only feed from Supabase tables <code>sensors</code> and <code>water_readings</code> (kept strictly separate from local browser simulation).
+            </p>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <span id="supabaseLastSyncText" style="font-size:0.76rem;color:var(--gray-500);font-family:var(--font-mono);">Syncing...</span>
+            <button type="button" id="btnRefreshSupabase" class="btn btn-sm btn-cyan">Refresh Supabase Data</button>
+          </div>
+        </div>
+        <div id="supabasePanelBody" aria-live="polite">
+          <p style="font-size:0.85rem;color:var(--gray-500);">Loading sensors and water_readings from Supabase...</p>
+        </div>
+      </section>
 
       <!-- Dynamic Station Cards Grid -->
       <div id="dashboardStationsGrid" class="stations-grid" aria-live="polite"></div>
@@ -972,7 +1001,7 @@
     </div>
   </footer>
 
-  <!-- External JavaScript (Connected for Server Deployment) -->
-  <script src="script.js" defer></script>
+  <!-- External JavaScript (Bundled as ES Module for Supabase + Server Deployment) -->
+  <script type="module" src="/script.js"></script>
 </body>
 </html>
