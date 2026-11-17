@@ -20,7 +20,7 @@
   <div class="prototype-banner" role="region" aria-label="Prototype Disclaimer and Telemetry Status">
     <div class="prototype-banner-inner">
       <div>
-        <span class="proto-badge">Simulated IoT Prototype</span>
+        <span class="proto-badge">SIMULATED DEMO DATA</span>
         <span>
           <strong>Educational Prototype:</strong> Sensor measurements are simulated (Arduino GIGA R1 WiFi hardware not yet connected). Not an official NYC emergency service; call 911 for life-threatening emergencies.
         </span>
@@ -82,23 +82,24 @@
 
       <nav id="primaryNav" class="primary-nav" aria-label="Primary Navigation">
         <button type="button" id="navBtnHome" class="nav-btn active" data-view="home">Home</button>
-        <button type="button" id="navBtnDashboard" class="nav-btn" data-view="dashboard">Live Dashboard</button>
-        <button type="button" id="navBtnMap" class="nav-btn" data-view="map">NYC Map</button>
-        <button type="button" id="navBtnCharts" class="nav-btn" data-view="charts">Water-Level Charts</button>
-        <button type="button" id="navBtnAlerts" class="nav-btn" data-view="alerts">
+        <button type="button" id="navBtnDashboard" class="nav-btn" data-view="dashboard" data-protected="true">Live Dashboard</button>
+        <button type="button" id="navBtnMap" class="nav-btn" data-view="map" data-protected="true">NYC Map</button>
+        <button type="button" id="navBtnCharts" class="nav-btn" data-view="charts" data-protected="true">Water-Level Charts</button>
+        <button type="button" id="navBtnAlerts" class="nav-btn" data-view="alerts" data-protected="true">
           Flood Alerts <span id="activeAlertBadge" class="nav-badge">2</span>
         </button>
-        <button type="button" id="navBtnManagement" class="nav-btn" data-view="management">Sensor &amp; Alert Admin</button>
+        <button type="button" id="navBtnManagement" class="nav-btn" data-view="management" data-protected="true">Sensor &amp; Alert Admin</button>
+        <button type="button" id="navBtnRealData" class="nav-btn" data-view="realdata">Real NYC Flood Data</button>
         <button type="button" id="navBtnAbout" class="nav-btn" data-view="about">Project &amp; IoT Info</button>
       </nav>
 
       <div class="header-controls">
-        <div class="role-selector-wrap">
-          <label for="roleSelector">Role:</label>
-          <select id="roleSelector" class="role-select" aria-label="Select User Persona Role">
+        <div class="role-selector-wrap" title="UI display perspective only — does not grant authentication or database admin privileges">
+          <label for="roleSelector">View:</label>
+          <select id="roleSelector" class="role-select" aria-label="Select UI Display Mode (Not Authentication)">
             <option value="resident">NYC Resident</option>
             <option value="operator">Monitoring Personnel</option>
-            <option value="admin">System Administrator</option>
+            <option value="admin">Admin Sandbox</option>
           </select>
         </div>
         <button type="button" id="unitToggleBtn" class="unit-toggle-btn" title="Switch measurement units between inches and centimeters">
@@ -107,6 +108,16 @@
         <button type="button" id="openServerFilesBtn" class="code-pack-btn" title="Download the 3 separate server deployment files">
           3 Server Files
         </button>
+        <div id="authHeaderWidget" class="auth-header-widget" aria-live="polite">
+          <button type="button" id="btnHeaderSignIn" class="btn btn-sm btn-cyan">Sign In</button>
+          <div id="authUserSummary" class="auth-user-summary hidden">
+            <div class="auth-user-details">
+              <span id="authHeaderUserName" class="auth-user-name">User</span>
+              <span id="authHeaderUserEmail" class="auth-user-email">email@example.com</span>
+            </div>
+            <button type="button" id="btnHeaderLogout" class="btn btn-sm btn-outline auth-logout-btn">Logout</button>
+          </div>
+        </div>
       </div>
     </div>
   </header>
@@ -137,6 +148,139 @@
         </button>
       </div>
     </aside>
+
+    <!-- ==================================================================
+         VIEW 0: SUPABASE AUTHENTICATION PORTAL (#view-auth)
+         ================================================================== -->
+    <section id="view-auth" class="view-section" aria-labelledby="authPortalHeading">
+      <div class="auth-layout">
+        <div class="auth-info-card">
+          <span class="hero-eyebrow">Protected Monitoring Access • Supabase Auth</span>
+          <h2 id="authPortalHeading" class="hero-title" style="font-size:1.75rem;">
+            Sign In to Access the <span>NYC FloodGuard</span> Dashboard
+          </h2>
+          <p class="hero-desc" style="font-size:0.92rem;">
+            Authentication is required to access live monitoring dashboards, street water-level telemetry, NYC flood maps, historical charts, and alert management.
+          </p>
+          <ul class="auth-feature-list">
+            <li><strong>Persistent Sessions:</strong> Stay signed in securely across browser refreshes.</li>
+            <li><strong>Email Verification &amp; Recovery:</strong> Supports account confirmation links and self-service password resets.</li>
+            <li><strong>Row Level Security (RLS):</strong> Database reads stay protected via Supabase RLS policies and publishable keys.</li>
+            <li><strong>Display Mode Separation:</strong> The header View selector only adjusts prototype UI terminology and never grants authentication or admin privileges.</li>
+          </ul>
+          <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
+            <button type="button" id="btnAuthBackHome" class="btn btn-outline">Return to Public Home</button>
+          </div>
+        </div>
+
+        <div class="form-card auth-form-card">
+          <div id="authModeTabs" class="auth-tabs" role="tablist" aria-label="Authentication Modes">
+            <button type="button" id="tabAuthLogin" class="auth-tab active" role="tab" aria-selected="true" data-auth-mode="login">Sign In</button>
+            <button type="button" id="tabAuthSignUp" class="auth-tab" role="tab" aria-selected="false" data-auth-mode="signup">Sign Up</button>
+            <button type="button" id="tabAuthForgot" class="auth-tab" role="tab" aria-selected="false" data-auth-mode="forgot">Forgot Password</button>
+          </div>
+
+          <div id="authFeedbackBanner" class="auth-feedback hidden" role="alert" aria-live="polite"></div>
+
+          <!-- Login Form -->
+          <form id="authLoginForm" class="auth-form" novalidate>
+            <div class="form-group">
+              <label for="authLoginEmail" class="form-label">Email Address *</label>
+              <input type="email" id="authLoginEmail" class="form-control" autocomplete="email" placeholder="you@example.com" required />
+            </div>
+            <div class="form-group">
+              <label for="authLoginPassword" class="form-label">Password *</label>
+              <div class="password-input-wrap">
+                <input type="password" id="authLoginPassword" class="form-control" autocomplete="current-password" placeholder="Enter your password" required />
+                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authLoginPassword">Show</button>
+              </div>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
+              <button type="button" id="btnGoForgotFromLogin" class="auth-link-btn">Forgot password?</button>
+              <button type="button" id="btnGoSignUpFromLogin" class="auth-link-btn">Need an account? Sign Up</button>
+            </div>
+            <button type="submit" id="btnLoginSubmit" class="btn btn-cyan" style="width:100%;">Sign In to Monitoring Dashboard</button>
+          </form>
+
+          <!-- Registration (Sign Up) Form -->
+          <form id="authSignUpForm" class="auth-form hidden" novalidate>
+            <div class="form-group">
+              <label for="authSignUpName" class="form-label">Full Name *</label>
+              <input type="text" id="authSignUpName" class="form-control" autocomplete="name" placeholder="e.g., Jordan Alvarez" required />
+            </div>
+            <div class="form-group">
+              <label for="authSignUpEmail" class="form-label">Email Address *</label>
+              <input type="email" id="authSignUpEmail" class="form-control" autocomplete="email" placeholder="you@example.com" required />
+            </div>
+            <div class="form-group">
+              <label for="authSignUpPassword" class="form-label">Password * <span style="font-weight:500;color:var(--gray-500);">(min. 6 characters)</span></label>
+              <div class="password-input-wrap">
+                <input type="password" id="authSignUpPassword" class="form-control" autocomplete="new-password" placeholder="Create a strong password" required />
+                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authSignUpPassword">Show</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="authSignUpConfirmPassword" class="form-label">Confirm Password *</label>
+              <div class="password-input-wrap">
+                <input type="password" id="authSignUpConfirmPassword" class="form-control" autocomplete="new-password" placeholder="Re-enter your password" required />
+                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authSignUpConfirmPassword">Show</button>
+              </div>
+            </div>
+            <button type="submit" id="btnSignUpSubmit" class="btn btn-cyan" style="width:100%;margin-top:4px;">Create FloodGuard Account</button>
+          </form>
+
+          <!-- Email Verification Required Notice -->
+          <div id="authVerifyBox" class="auth-verify-box hidden">
+            <span class="status-badge badge-normal" style="margin-bottom:8px;">Check Your Inbox</span>
+            <h3 style="font-size:1.05rem;font-weight:800;color:var(--navy-900);margin-bottom:6px;">Email Verification Required</h3>
+            <p id="authVerifyMessage" style="font-size:0.86rem;color:var(--gray-700);margin-bottom:14px;">
+              We sent a confirmation link to your email address. Please verify your email before signing in.
+            </p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button type="button" id="btnResendVerification" class="btn btn-sm btn-primary">Resend Verification Email</button>
+              <button type="button" id="btnVerifyBackToLogin" class="btn btn-sm btn-outline">Back to Sign In</button>
+            </div>
+          </div>
+
+          <!-- Forgot Password Form -->
+          <form id="authForgotForm" class="auth-form hidden" novalidate>
+            <p style="font-size:0.84rem;color:var(--gray-600);margin-bottom:12px;">
+              Enter your registered email address and we will send a password reset link powered by Supabase Auth.
+            </p>
+            <div class="form-group">
+              <label for="authForgotEmail" class="form-label">Account Email Address *</label>
+              <input type="email" id="authForgotEmail" class="form-control" autocomplete="email" placeholder="you@example.com" required />
+            </div>
+            <button type="submit" id="btnForgotSubmit" class="btn btn-cyan" style="width:100%;margin-bottom:10px;">Send Password Reset Link</button>
+            <button type="button" id="btnBackToLoginFromForgot" class="btn btn-outline" style="width:100%;">Back to Sign In</button>
+          </form>
+
+          <!-- Password Recovery (Set New Password) Form -->
+          <form id="authRecoveryForm" class="auth-form hidden" novalidate>
+            <span class="status-badge badge-warning" style="margin-bottom:8px;">Password Recovery Active</span>
+            <h3 style="font-size:1.05rem;font-weight:800;color:var(--navy-900);margin-bottom:6px;">Set a New Password</h3>
+            <p style="font-size:0.84rem;color:var(--gray-600);margin-bottom:12px;">
+              Your recovery link was verified. Choose a new password for your NYC FloodGuard account.
+            </p>
+            <div class="form-group">
+              <label for="authRecoveryNewPassword" class="form-label">New Password * <span style="font-weight:500;color:var(--gray-500);">(min. 6 characters)</span></label>
+              <div class="password-input-wrap">
+                <input type="password" id="authRecoveryNewPassword" class="form-control" autocomplete="new-password" placeholder="Enter new password" required />
+                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authRecoveryNewPassword">Show</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="authRecoveryConfirmPassword" class="form-label">Confirm New Password *</label>
+              <div class="password-input-wrap">
+                <input type="password" id="authRecoveryConfirmPassword" class="form-control" autocomplete="new-password" placeholder="Confirm new password" required />
+                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authRecoveryConfirmPassword">Show</button>
+              </div>
+            </div>
+            <button type="submit" id="btnRecoverySubmit" class="btn btn-cyan" style="width:100%;">Update Password &amp; Continue</button>
+          </form>
+        </div>
+      </div>
+    </section>
 
     <!-- ==================================================================
          VIEW 1: HOMEPAGE (#view-home)
@@ -174,13 +318,14 @@
             <button type="button" id="btnGoDashboardHero" class="btn btn-cyan">Open Live Monitoring Dashboard</button>
             <button type="button" id="btnGoMapHero" class="btn btn-outline">Explore Interactive NYC Map</button>
           </div>
+          <div id="homeAuthStatusNotice" style="margin-top:10px;font-size:0.8rem;color:var(--cyan-300);"></div>
         </div>
 
         <!-- Live Network Snapshot Panel -->
         <div class="hero-live-panel">
           <div class="hero-live-header">
             <span style="font-weight:700;font-size:0.9rem;color:#67E8F9;">Citywide Telemetry Pulse (5s Cadence)</span>
-            <span class="proto-badge">Simulated Live</span>
+            <span class="dataset-badge dataset-badge-sim">SIMULATED DEMO DATA</span>
           </div>
           <div class="hero-stat-grid">
             <div class="hero-stat-item">
@@ -274,8 +419,12 @@
     <section id="view-dashboard" class="view-section" aria-labelledby="dashHeading">
       <div class="section-header">
         <div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+            <span class="dataset-badge dataset-badge-sim">SIMULATED DEMO DATA • 5-Second Local Stream</span>
+            <span class="badge-db">Cloud Demo Panel Below (Supabase RLS)</span>
+          </div>
           <h2 id="dashHeading" class="section-title">Real-Time NYC Water-Level Monitoring Dashboard</h2>
-          <p class="section-subtitle">Low-latency simulated ultrasonic measurements updating every 5 seconds. Outdated readings (&gt;15s) are automatically flagged.</p>
+          <p class="section-subtitle">Low-latency simulated ultrasonic measurements updating every 5 seconds. Outdated readings (&gt;15s) are automatically flagged and kept separate from Real NYC Flood Data.</p>
         </div>
       </div>
 
@@ -369,8 +518,9 @@
     <section id="view-map" class="view-section" aria-labelledby="mapHeading">
       <div class="section-header">
         <div>
+          <span class="dataset-badge dataset-badge-sim" style="margin-bottom:4px;">SIMULATED DEMO DATA • 5-Second Local Stream</span>
           <h2 id="mapHeading" class="section-title">Interactive Five-Borough NYC Flood Sensor Map</h2>
-          <p class="section-subtitle">Click any pulsing sensor pin to inspect real-time water depth, ultrasonic hardware diagnostics, and local street advisories.</p>
+          <p class="section-subtitle">Click any pulsing sensor pin to inspect real-time simulated water depth, ultrasonic hardware diagnostics, and local street advisories.</p>
         </div>
       </div>
 
@@ -476,8 +626,9 @@
     <section id="view-charts" class="view-section" aria-labelledby="chartsHeading">
       <div class="section-header">
         <div>
+          <span class="dataset-badge dataset-badge-sim" style="margin-bottom:4px;">SIMULATED DEMO DATA • Browser localStorage</span>
           <h2 id="chartsHeading" class="section-title">Historical Water-Level Trends &amp; Flood Threshold Analytics</h2>
-          <p class="section-subtitle">Analyze persisted sensor measurements against configured Warning and Critical thresholds across time windows.</p>
+          <p class="section-subtitle">Analyze simulated sensor measurements against configured Warning and Critical thresholds across time windows.</p>
         </div>
       </div>
 
@@ -662,13 +813,13 @@
         </div>
       </div>
 
-      <!-- Role Notice for Non-Admins -->
+      <!-- Display Mode Notice for Local Sandbox -->
       <div id="adminRoleNotice" class="role-context-bar" style="border-left-color:var(--warn-500);background:var(--warn-50);">
         <div class="role-context-info">
-          <span class="status-badge badge-warning">Permission Notice</span>
-          <span>You are currently viewing in <strong>Resident / Operator</strong> mode. Switch to <strong>System Administrator</strong> to unlock full Create/Update/Delete sensor management, or click the button on the right.</span>
+          <span class="status-badge badge-warning">Display Mode Notice</span>
+          <span>This selector only adjusts the local prototype UI perspective (<strong>not</strong> authentication or Supabase database privileges). Switch to <strong>Admin Sandbox</strong> to preview local simulation CRUD controls.</span>
         </div>
-        <button type="button" id="btnQuickElevateAdmin" class="btn btn-sm btn-primary">Unlock Administrator Mode</button>
+        <button type="button" id="btnQuickElevateAdmin" class="btn btn-sm btn-primary">Preview Admin Sandbox</button>
       </div>
 
       <!-- Interactive Hardware Override & Sensor Test Bench -->
@@ -827,6 +978,198 @@
           </form>
         </aside>
       </div>
+    </section>
+
+    <!-- ==================================================================
+         VIEW 6B: REAL NYC FLOOD DATA — NYC OPEN DATA / FLOODNET (#view-realdata)
+         ================================================================== -->
+    <section id="view-realdata" class="view-section" aria-labelledby="realDataHeading">
+      <div class="section-header">
+        <div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+            <span class="dataset-badge dataset-badge-real">REAL HISTORICAL DATA • NYC Open Data (FloodNet)</span>
+            <span class="dataset-badge dataset-badge-historical">HISTORICAL ARCHIVE (NOT LIVE)</span>
+            <span class="borough-chip">Joined via sensor_id • Public SODA API</span>
+          </div>
+          <h2 id="realDataHeading" class="section-title">Official NYC FloodNet Historical Flood Events</h2>
+          <p class="section-subtitle">
+            Historical flood archive retrieved from NYC Open Data (<code>aq7i-eu5q</code>) and joined with deployed FloodNet sensor locations (<code>kb2e-tjy3</code>). This is <strong>historical recorded data (not a live feed)</strong> and is kept separate from <strong>SIMULATED DEMO DATA</strong>.
+          </p>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span id="realDataSyncMeta" style="font-size:0.78rem;color:var(--gray-500);font-family:var(--font-mono);">Ready to load NYC Open Data</span>
+          <button type="button" id="btnRefreshRealData" class="btn btn-cyan">Refresh Data</button>
+        </div>
+      </div>
+
+      <!-- Data Isolation, Historical Label & API Most Recent Update Date Notice -->
+      <div class="realdata-source-banner">
+        <div>
+          <strong>Historical Archive Verification (Not Live):</strong> Displaying actual past street flood events measured by NYC FloodNet sensors. Only events you explicitly bookmark are saved to Supabase.
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-family:var(--font-mono);font-size:0.76rem;color:var(--navy-900);">
+          <span id="realDataApiUpdatedMeta">API Dataset Updated: Loading...</span>
+          <span>•</span>
+          <span id="realDataLatestEventMeta">Latest Event: Loading...</span>
+        </div>
+      </div>
+
+      <!-- KPI Summary Strip -->
+      <div class="kpi-grid">
+        <div class="kpi-card kpi-cyan">
+          <div class="kpi-label">Matching Historical Events</div>
+          <div id="realDataKpiTotal" class="kpi-value">—</div>
+          <div id="realDataKpiTotalMeta" class="kpi-meta">Filtered historical FloodNet records</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Deployed FloodNet Sensors</div>
+          <div id="realDataKpiSensors" class="kpi-value">—</div>
+          <div id="realDataKpiMeta" class="kpi-meta">Joined metadata via <code>sensor_id</code></div>
+        </div>
+        <div class="kpi-card kpi-warn">
+          <div class="kpi-label">Peak Depth (Current Page)</div>
+          <div id="realDataKpiPeakDepth" class="kpi-value">—</div>
+          <div id="realDataKpiPeakSensor" class="kpi-meta">Exact reported inches</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Filtered Pagination (&gt;1,000)</div>
+          <div id="realDataKpiRange" class="kpi-value">—</div>
+          <div id="realDataKpiPageMeta" class="kpi-meta">Paginates filtered results</div>
+        </div>
+      </div>
+
+      <!-- Search & Filter Controls -->
+      <form id="realDataFilterForm" class="filter-bar realdata-filter-bar">
+        <div class="filter-group" style="flex:1;min-width:240px;">
+          <input
+            type="text"
+            id="realDataSearchInput"
+            class="filter-input"
+            style="min-width:250px;flex:1;"
+            placeholder="Search sensor name, street, borough, or ZIP (e.g., Beach 84, Degraw, 11693)..."
+            aria-label="Search real NYC FloodNet sensor name or location"
+          />
+          <select id="realDataBoroughFilter" class="filter-select" aria-label="Filter by Borough">
+            <option value="ALL">All Boroughs</option>
+          </select>
+          <select id="realDataSensorFilter" class="filter-select" style="max-width:250px;" aria-label="Filter by Sensor">
+            <option value="ALL">All FloodNet Sensors</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label for="realDataStartDate" style="font-size:0.76rem;font-weight:700;color:var(--gray-600);">From:</label>
+          <input type="date" id="realDataStartDate" class="filter-input" aria-label="Filter start date" />
+          <label for="realDataEndDate" style="font-size:0.76rem;font-weight:700;color:var(--gray-600);">To:</label>
+          <input type="date" id="realDataEndDate" class="filter-input" aria-label="Filter end date" />
+          <select id="realDataPageSize" class="filter-select" aria-label="Records per page">
+            <option value="25">25 / page</option>
+            <option value="50">50 / page</option>
+            <option value="100">100 / page</option>
+          </select>
+          <button type="submit" id="btnApplyRealDataSearch" class="btn btn-sm btn-primary">Search</button>
+          <button type="button" id="btnResetRealDataFilters" class="btn btn-sm btn-outline">Reset</button>
+        </div>
+      </form>
+
+      <!-- Loading Indicator -->
+      <div id="realDataLoadingBox" class="realdata-state-box realdata-loading hidden" role="status" aria-live="polite">
+        <span class="realdata-spinner" aria-hidden="true"></span>
+        <div>
+          <strong>Fetching historical NYC FloodNet archive records...</strong>
+          <div style="font-size:0.8rem;color:var(--gray-600);">Querying NYC Open Data endpoints via <code>fetch()</code> and joining sensor metadata by <code>sensor_id</code>.</div>
+        </div>
+      </div>
+
+      <!-- API Error State -->
+      <div id="realDataErrorBox" class="realdata-state-box realdata-error hidden" role="alert">
+        <div>
+          <strong>Unable to retrieve NYC Open Data records</strong>
+          <p id="realDataErrorText" style="font-size:0.84rem;margin-top:4px;"></p>
+        </div>
+        <button type="button" id="btnRetryRealData" class="btn btn-sm btn-danger">Retry Request</button>
+      </div>
+
+      <!-- Empty / No Results State -->
+      <div id="realDataEmptyBox" class="realdata-state-box hidden">
+        <div>
+          <strong>No historical flood events matched your filters</strong>
+          <p style="font-size:0.84rem;color:var(--gray-600);margin-top:4px;">
+            Try broadening your sensor/location search string, switching the borough or sensor selector back to All, or clearing the date range.
+          </p>
+        </div>
+        <button type="button" id="btnEmptyResetRealData" class="btn btn-sm btn-outline">Reset All Filters</button>
+      </div>
+
+      <!-- Real Historical Data Records Table -->
+      <div id="realDataTableWrap" class="table-card" style="margin-bottom:22px;">
+        <div style="padding:12px 16px;border-bottom:1px solid var(--gray-200);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span class="dataset-badge dataset-badge-real">REAL HISTORICAL DATA</span>
+            <span id="realDataActiveSummary" style="font-size:0.82rem;font-weight:700;color:var(--navy-900);">Historical Flood Events</span>
+          </div>
+          <span id="realDataOffsetInfo" style="font-size:0.76rem;font-family:var(--font-mono);color:var(--gray-600);">Offset: 0</span>
+        </div>
+
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Sensor Name &amp; ID</th>
+                <th>Location (Joined Metadata via <code>sensor_id</code>)</th>
+                <th>Flood Start Date</th>
+                <th class="num-col">Max Flood Depth (in)</th>
+                <th class="num-col">Flood Duration (mins)</th>
+                <th>Bookmark</th>
+              </tr>
+            </thead>
+            <tbody id="realDataTableBody"></tbody>
+          </table>
+        </div>
+
+        <!-- Pagination Bar (Operates on Filtered Results, Supports >1,000 Records) -->
+        <div id="realDataPaginationBar" class="realdata-pagination-bar">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <button type="button" id="btnRealPageFirst" class="btn btn-sm btn-outline">&laquo; First</button>
+            <button type="button" id="btnRealPagePrev" class="btn btn-sm btn-outline">&lsaquo; Previous</button>
+            <span id="realDataPageIndicator" class="realdata-page-indicator">Page 1 of 1</span>
+            <button type="button" id="btnRealPageNext" class="btn btn-sm btn-outline">Next &rsaquo;</button>
+            <button type="button" id="btnRealPageLast" class="btn btn-sm btn-outline">Last &raquo;</button>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button type="button" id="btnJumpPast1000" class="btn btn-sm btn-primary" title="Jump past record 1,000 to verify pagination beyond SODA's default 1,000-row limit">
+              Jump Past 1,000th Record
+            </button>
+            <label for="realDataJumpPageInput" style="font-size:0.76rem;font-weight:700;color:var(--gray-600);">Go to Page:</label>
+            <input type="number" id="realDataJumpPageInput" class="filter-input" min="1" value="1" style="width:74px;padding:4px 8px;" />
+            <button type="button" id="btnRealPageGo" class="btn btn-sm btn-outline">Go</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Per-User Saved Historical Flood Events (Supabase RLS Bookmarks) -->
+      <section id="realDataSavedPanel" class="form-card saved-events-panel" aria-labelledby="savedEventsHeading">
+        <div class="supabase-panel-header">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+              <span class="badge-db">Supabase Bookmarks • RLS Protected (auth.uid() = user_id)</span>
+              <span id="savedEventsCountBadge" class="status-badge badge-normal">0 Saved</span>
+            </div>
+            <h3 id="savedEventsHeading" style="font-size:1.05rem;font-weight:800;color:var(--navy-900);">
+              My Saved Historical Flood Events
+            </h3>
+            <p style="font-size:0.8rem;color:var(--gray-600);">
+              Bookmarked events from NYC Open Data stored privately per user in <code>saved_flood_events</code>. Duplicate bookmarks are prevented automatically.
+            </p>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button type="button" id="btnRefreshSavedEvents" class="btn btn-sm btn-outline">Refresh Saved List</button>
+          </div>
+        </div>
+        <div id="savedEventsPanelBody" aria-live="polite">
+          <p style="font-size:0.85rem;color:var(--gray-500);">Sign in to save and manage your personal historical flood event bookmarks.</p>
+        </div>
+      </section>
     </section>
 
     <!-- ==================================================================
@@ -1002,6 +1345,6 @@
   </footer>
 
   <!-- External JavaScript (Bundled as ES Module for Supabase + Server Deployment) -->
-  <script type="module" src="/script.js"></script>
+  <script type="module" src="./script.js"></script>
 </body>
 </html>

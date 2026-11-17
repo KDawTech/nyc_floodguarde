@@ -1,14 +1,18 @@
 /**
  * ============================================================================
- * NYC FloodGuard — Read-Only Supabase Client & Data Service
+ * NYC FloodGuard — Supabase Client, Authentication & Read-Only Data Service
  * File: supabaseClient.js
  *
- * Connects to Supabase using @supabase/supabase-js and client-safe publishable
- * credentials with Row Level Security (RLS) enabled.
- * Strictly read-only: queries `sensors` and `water_readings` tables only.
+ * Reuses the single Supabase client configured with VITE_SUPABASE_URL and
+ * VITE_SUPABASE_PUBLISHABLE_KEY with Row Level Security (RLS) enabled.
+ * - Auth: signUp, signInWithPassword, getSession, onAuthStateChange, signOut,
+ *         resetPasswordForEmail, updateUser, resend (with session persistence).
+ * - Data: Strictly read-only SELECT queries against `sensors` and `water_readings`.
  * ============================================================================
  */
 import { createClient } from '@supabase/supabase-js';
+
+const GITHUB_PAGES_REDIRECT_URL = 'https://kdawtech.github.io/nyc_floodguarde/';
 
 function cleanEnvValue(raw) {
   return String(raw || '')
@@ -19,7 +23,6 @@ function cleanEnvValue(raw) {
 
 function normalizeSupabaseUrl(raw) {
   let cleaned = cleanEnvValue(raw);
-  // Recover gracefully if copy-paste dropped the leading 'h' in https://
   if (/^ttps:\/\//i.test(cleaned)) {
     cleaned = 'h' + cleaned;
   }
@@ -35,6 +38,30 @@ const supabaseKey = cleanEnvValue(
 
 let cachedClient = null;
 let clientInitError = null;
+
+/**
+ * Computes the email verification / password reset redirect URL so redirects
+ * work seamlessly both locally and on GitHub Pages (/nyc_floodguarde/).
+ */
+export function getAuthRedirectUrl() {
+  if (typeof window === 'undefined') {
+    return GITHUB_PAGES_REDIRECT_URL;
+  }
+  try {
+    const current = new URL(window.location.href);
+    if (current.hostname === 'kdawtech.github.io') {
+      return GITHUB_PAGES_REDIRECT_URL;
+    }
+    current.hash = '';
+    current.search = '';
+    if (!current.pathname.endsWith('/')) {
+      current.pathname = current.pathname.replace(/\/[^/]*$/, '/');
+    }
+    return current.toString();
+  } catch {
+    return GITHUB_PAGES_REDIRECT_URL;
+  }
+}
 
 export function getSupabaseDiagnostics() {
   let hostLabel = 'not set';
@@ -58,7 +85,7 @@ export function isSupabaseConfigured() {
   return Boolean(supabaseUrl && supabaseKey);
 }
 
-function getSupabaseClient() {
+export function getSupabaseClient() {
   if (cachedClient) return { client: cachedClient, error: null };
   if (clientInitError) return { client: null, error: clientInitError };
 
@@ -77,9 +104,9 @@ function getSupabaseClient() {
     }
     cachedClient = createClient(supabaseUrl, supabaseKey, {
       auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
       }
     });
     return { client: cachedClient, error: null };
@@ -92,6 +119,104 @@ function getSupabaseClient() {
   }
 }
 
+/* --------------------------------------------------------------------------
+ * SUPABASE AUTHENTICATION HELPERS
+ * -------------------------------------------------------------------------- */
+export async function getAuthSession() {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { session: null, error: new Error(initError || 'Supabase client not configured.') };
+  }
+  const { data, error } = await client.auth.getSession();
+  return { session: data?.session || null, error };
+}
+
+export function subscribeToAuthState(callback) {
+  const { client } = getSupabaseClient();
+  if (!client) {
+    return () => {};
+  }
+  const { data } = client.auth.onAuthStateChange((event, session) => {
+    callback(event, session);
+  });
+  return () => {
+    data?.subscription?.unsubscribe();
+  };
+}
+
+export async function signUpWithEmail({ fullName, email, password }) {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { data: null, error: new Error(initError || 'Supabase client not configured.') };
+  }
+  return client.auth.signUp({
+    email,
+    password,
+    options: {
+      data: {
+        full_name: fullName
+      },
+      emailRedirectTo: getAuthRedirectUrl()
+    }
+  });
+}
+
+export async function signInWithEmail({ email, password }) {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { data: null, error: new Error(initError || 'Supabase client not configured.') };
+  }
+  return client.auth.signInWithPassword({
+    email,
+    password
+  });
+}
+
+export async function resendVerificationEmail(email) {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { data: null, error: new Error(initError || 'Supabase client not configured.') };
+  }
+  return client.auth.resend({
+    type: 'signup',
+    email,
+    options: {
+      emailRedirectTo: getAuthRedirectUrl()
+    }
+  });
+}
+
+export async function sendPasswordResetEmail(email) {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { data: null, error: new Error(initError || 'Supabase client not configured.') };
+  }
+  return client.auth.resetPasswordForEmail(email, {
+    redirectTo: getAuthRedirectUrl()
+  });
+}
+
+export async function updateUserPassword(newPassword) {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { data: null, error: new Error(initError || 'Supabase client not configured.') };
+  }
+  return client.auth.updateUser({
+    password: newPassword
+  });
+}
+
+export async function signOutUser() {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { error: new Error(initError || 'Supabase client not configured.') };
+  }
+  return client.auth.signOut();
+}
+
+/* --------------------------------------------------------------------------
+ * READ-ONLY SENSOR & WATER READING QUERIES (RLS ENABLED)
+ * -------------------------------------------------------------------------- */
 function inferBoroughFromLocation(locationText) {
   const loc = String(locationText || '').toLowerCase();
   if (loc.includes('queens')) return 'Queens';
@@ -228,3 +353,193 @@ export async function fetchSupabaseFloodData() {
     };
   }
 }
+
+/* --------------------------------------------------------------------------
+ * SAVED HISTORICAL FLOOD EVENT BOOKMARKS (`saved_flood_events` + RLS)
+ * Only selected events bookmarked by the authenticated user are stored here.
+ * -------------------------------------------------------------------------- */
+export function buildFloodEventKey(sensorId, floodStartTime) {
+  return `${String(sensorId || '').trim()}|${String(floodStartTime || '').trim()}`;
+}
+
+function isMissingSavedTableError(err) {
+  if (!err) return false;
+  const code = String(err.code || '').toUpperCase();
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    code === '42P01' ||
+    code === 'PGRST205' ||
+    msg.includes('saved_flood_events') && (msg.includes('does not exist') || msg.includes('could not find'))
+  );
+}
+
+function normalizeSavedEventRow(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    eventKey: row.event_key || buildFloodEventKey(row.sensor_id, row.flood_start_time),
+    sensorId: row.sensor_id,
+    sensorName: row.sensor_name,
+    borough: row.borough || '',
+    streetName: row.street_name || '',
+    zipcode: row.zipcode || '',
+    floodStartTime: row.flood_start_time,
+    floodEndTime: row.flood_end_time || '',
+    maxDepthInches: row.max_depth_inches != null ? Number(row.max_depth_inches) : null,
+    durationMins: row.duration_mins != null ? Number(row.duration_mins) : null,
+    dataSource: row.data_source || 'nyc_open_data_aq7i_eu5q',
+    createdAt: row.created_at || null
+  };
+}
+
+export async function fetchSavedFloodEvents() {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return {
+      status: 'unconfigured',
+      events: [],
+      errorMessage: initError || 'Supabase client not configured.'
+    };
+  }
+
+  const { data: sessionData } = await client.auth.getSession();
+  const user = sessionData?.session?.user;
+  if (!user) {
+    return {
+      status: 'unauthenticated',
+      events: [],
+      errorMessage: 'Sign in to view your saved historical flood events.'
+    };
+  }
+
+  const { data, error } = await client
+    .from('saved_flood_events')
+    .select('*')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    if (isMissingSavedTableError(error)) {
+      return {
+        status: 'migration_required',
+        events: [],
+        errorMessage:
+          'Table "saved_flood_events" has not been created in Supabase yet. Run the SQL migration in Supabase SQL Editor to enable bookmarks.'
+      };
+    }
+    return {
+      status: 'error',
+      events: [],
+      errorMessage: error.message || 'Failed to load saved flood events.'
+    };
+  }
+
+  return {
+    status: 'ok',
+    events: (data || []).map(normalizeSavedEventRow),
+    errorMessage: ''
+  };
+}
+
+export async function saveFloodEventBookmark(eventRecord) {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { status: 'error', event: null, errorMessage: initError || 'Supabase client not configured.' };
+  }
+
+  const { data: sessionData } = await client.auth.getSession();
+  const user = sessionData?.session?.user;
+  if (!user) {
+    return {
+      status: 'unauthenticated',
+      event: null,
+      errorMessage: 'Please sign in before bookmarking a historical flood event.'
+    };
+  }
+
+  const eventKey = buildFloodEventKey(eventRecord.sensorId, eventRecord.floodStartTime);
+  const payload = {
+    user_id: user.id,
+    event_key: eventKey,
+    sensor_id: eventRecord.sensorId,
+    sensor_name: eventRecord.sensorName,
+    borough: eventRecord.borough || null,
+    street_name: eventRecord.streetName || null,
+    zipcode: eventRecord.zipcode || null,
+    flood_start_time: eventRecord.floodStartTime,
+    flood_end_time: eventRecord.floodEndTime || null,
+    max_depth_inches: eventRecord.maxDepthInches,
+    duration_mins: eventRecord.durationMins,
+    data_source: 'nyc_open_data_aq7i_eu5q'
+  };
+
+  const { data, error } = await client
+    .from('saved_flood_events')
+    .insert(payload)
+    .select('*')
+    .single();
+
+  if (error) {
+    if (isMissingSavedTableError(error)) {
+      return {
+        status: 'migration_required',
+        event: null,
+        errorMessage:
+          'Table "saved_flood_events" does not exist yet. Run the SQL migration in your Supabase SQL Editor first.'
+      };
+    }
+    if (String(error.code) === '23505' || String(error.message || '').toLowerCase().includes('duplicate')) {
+      return {
+        status: 'duplicate',
+        event: null,
+        errorMessage: 'This flood event is already saved in your bookmarks.'
+      };
+    }
+    return {
+      status: 'error',
+      event: null,
+      errorMessage: error.message || 'Unable to save flood event bookmark.'
+    };
+  }
+
+  return {
+    status: 'ok',
+    event: data ? normalizeSavedEventRow(data) : null,
+    errorMessage: ''
+  };
+}
+
+export async function deleteSavedFloodEvent(savedId) {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { status: 'error', errorMessage: initError || 'Supabase client not configured.' };
+  }
+
+  const { data: sessionData } = await client.auth.getSession();
+  const user = sessionData?.session?.user;
+  if (!user) {
+    return { status: 'unauthenticated', errorMessage: 'Sign in required to delete bookmarks.' };
+  }
+
+  const { error } = await client
+    .from('saved_flood_events')
+    .delete()
+    .eq('id', savedId)
+    .eq('user_id', user.id);
+
+  if (error) {
+    if (isMissingSavedTableError(error)) {
+      return {
+        status: 'migration_required',
+        errorMessage: 'Table "saved_flood_events" does not exist yet. Run the SQL migration first.'
+      };
+    }
+    return {
+      status: 'error',
+      errorMessage: error.message || 'Unable to delete saved flood event.'
+    };
+  }
+
+  return { status: 'ok', errorMessage: '' };
+}
+

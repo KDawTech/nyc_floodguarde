@@ -25,7 +25,26 @@
  *      - Full Create, Read, Update, Delete (CRUD) for stations and alert rules.
  * ============================================================================
  */
-import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient.js';
+import {
+  fetchSupabaseFloodData,
+  getSupabaseDiagnostics,
+  getAuthSession,
+  subscribeToAuthState,
+  signUpWithEmail,
+  signInWithEmail,
+  resendVerificationEmail,
+  sendPasswordResetEmail,
+  updateUserPassword,
+  signOutUser,
+  buildFloodEventKey,
+  fetchSavedFloodEvents,
+  saveFloodEventBookmark,
+  deleteSavedFloodEvent
+} from './supabaseClient.js';
+import {
+  fetchFloodNetSensorMetadata,
+  fetchFloodNetEvents
+} from './nycOpenData.js';
 
 (function () {
   'use strict';
@@ -320,6 +339,21 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
    * 3. APPLICATION STATE & HELPER FUNCTIONS
    * -------------------------------------------------------------------------- */
   const appState = FloodGuardAPI.loadState();
+  const PROTECTED_VIEWS = new Set(['dashboard', 'map', 'charts', 'alerts', 'management']);
+  const LAST_VIEW_KEY = 'nyc_floodguard_last_view_v1';
+
+  const authState = {
+    loading: true,
+    session: null,
+    user: null,
+    mode: 'login', // 'login' | 'signup' | 'forgot' | 'verify' | 'recovery'
+    pendingEmailForVerify: '',
+    pendingProtectedView: null,
+    recoveryActive: false
+  };
+
+  let authUnsubscribe = null;
+
   const supabaseState = {
     status: 'connecting', // 'connecting' | 'connected' | 'offline' | 'error' | 'unconfigured'
     errorMessage: '',
@@ -328,6 +362,46 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
     latencyMs: null,
     sensors: [],
     readings: []
+  };
+
+  /**
+   * Real historical NYC FloodNet state (from data.cityofnewyork.us).
+   * Strictly isolated from `appState` (5s simulated telemetry) and `supabaseState`.
+   */
+  const realFloodState = {
+    initialized: false,
+    loading: false,
+    error: '',
+    metadataLoaded: false,
+    sensorsList: [],
+    sensorById: new Map(),
+    boroughs: [],
+    records: [],
+    totalCount: 0,
+    totalPages: 1,
+    page: 1,
+    pageSize: 25,
+    search: '',
+    borough: 'ALL',
+    sensorId: 'ALL',
+    startDate: '',
+    endDate: '',
+    apiUpdatedAtIso: '',
+    latestRecordedEventIso: '',
+    lastFetchedMs: null,
+    latencyMs: null,
+    abortController: null
+  };
+
+  /**
+   * Per-user bookmarked historical flood events persisted in Supabase (`saved_flood_events`).
+   */
+  const savedEventsState = {
+    status: 'idle', // 'idle' | 'unauthenticated' | 'ok' | 'migration_required' | 'error' | 'unconfigured'
+    loading: false,
+    errorMessage: '',
+    events: [],
+    savingKeys: new Set()
   };
   let activeView = 'home';
   let selectedMapStationId = appState.stations[0] ? appState.stations[0].id : null;
@@ -449,9 +523,151 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
   }
 
   /* --------------------------------------------------------------------------
-   * 5. NAVIGATION & ROLE SWITCHING
+   * 5. NAVIGATION, AUTHENTICATION GATE & DISPLAY-ONLY ROLE SWITCHING
    * -------------------------------------------------------------------------- */
-  function switchView(viewName) {
+  function isAuthenticated() {
+    return Boolean(authState.session && authState.user && !authState.recoveryActive);
+  }
+
+  function getUserDisplayName(user) {
+    if (!user) return '';
+    const fullName = user.user_metadata?.full_name || user.user_metadata?.name || '';
+    if (String(fullName).trim()) return String(fullName).trim();
+    return user.email ? user.email.split('@')[0] : 'FloodGuard User';
+  }
+
+  function showAuthFeedback(message, type) {
+    const banner = document.getElementById('authFeedbackBanner');
+    if (!banner) return;
+    if (!message) {
+      banner.textContent = '';
+      banner.className = 'auth-feedback hidden';
+      return;
+    }
+    const kind = type === 'success' ? 'is-success' : type === 'info' ? 'is-info' : 'is-error';
+    banner.textContent = message;
+    banner.className = `auth-feedback ${kind}`;
+  }
+
+  function setAuthMode(mode, preserveFeedback) {
+    authState.mode = mode;
+    if (!preserveFeedback) {
+      showAuthFeedback('', 'info');
+    }
+
+    const tabsWrap = document.getElementById('authModeTabs');
+    if (tabsWrap) {
+      tabsWrap.classList.toggle('hidden', mode === 'recovery');
+    }
+
+    document.querySelectorAll('.auth-tab').forEach((tab) => {
+      const tabMode = tab.getAttribute('data-auth-mode');
+      const active = tabMode === mode || (mode === 'verify' && tabMode === 'signup');
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+    });
+
+    document.getElementById('authLoginForm')?.classList.toggle('hidden', mode !== 'login');
+    document.getElementById('authSignUpForm')?.classList.toggle('hidden', mode !== 'signup');
+    document.getElementById('authVerifyBox')?.classList.toggle('hidden', mode !== 'verify');
+    document.getElementById('authForgotForm')?.classList.toggle('hidden', mode !== 'forgot');
+    document.getElementById('authRecoveryForm')?.classList.toggle('hidden', mode !== 'recovery');
+  }
+
+  function updateAuthUI() {
+    const authed = isAuthenticated();
+    const signInBtn = document.getElementById('btnHeaderSignIn');
+    const userSummary = document.getElementById('authUserSummary');
+    const userNameEl = document.getElementById('authHeaderUserName');
+    const userEmailEl = document.getElementById('authHeaderUserEmail');
+    const homeNotice = document.getElementById('homeAuthStatusNotice');
+
+    if (signInBtn) signInBtn.classList.toggle('hidden', authed);
+    if (userSummary) userSummary.classList.toggle('hidden', !authed);
+
+    if (authed && authState.user) {
+      const displayName = getUserDisplayName(authState.user);
+      const email = authState.user.email || '';
+      if (userNameEl) userNameEl.textContent = displayName;
+      if (userEmailEl) userEmailEl.textContent = email;
+      if (homeNotice) {
+        homeNotice.innerHTML = `Signed in as <strong>${escapeHtml(displayName)}</strong> (${escapeHtml(email)}) — Full monitoring workspace unlocked.`;
+      }
+    } else {
+      if (homeNotice) {
+        homeNotice.innerHTML = `Authentication required to access the Live Monitoring Dashboard, NYC Map, Charts, Alerts, and Admin Sandbox.`;
+      }
+    }
+
+    document.querySelectorAll('.nav-btn[data-protected="true"]').forEach((btn) => {
+      btn.classList.toggle('nav-locked', !authed);
+    });
+  }
+
+  function setButtonBusy(btn, busyText, isBusy) {
+    if (!btn) return;
+    if (isBusy) {
+      if (!btn.dataset.originalText) btn.dataset.originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = busyText;
+    } else {
+      btn.disabled = false;
+      if (btn.dataset.originalText) btn.textContent = btn.dataset.originalText;
+    }
+  }
+
+  function isValidEmail(email) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  }
+
+  function mapAuthError(err) {
+    const raw = (err && (err.message || err.error_description)) || 'Authentication request failed.';
+    const lower = raw.toLowerCase();
+    if (lower.includes('invalid login credentials')) {
+      return 'Incorrect email or password. Please double-check your credentials or use Forgot Password.';
+    }
+    if (lower.includes('email not confirmed')) {
+      return 'Your email address has not been verified yet. Please click the confirmation link sent to your inbox.';
+    }
+    if (lower.includes('user already registered') || lower.includes('already been registered')) {
+      return 'An account with this email already exists. Please sign in or reset your password.';
+    }
+    if (lower.includes('password should be at least')) {
+      return 'Password must be at least 6 characters long.';
+    }
+    if (lower.includes('rate limit') || lower.includes('security purposes')) {
+      return 'Too many requests in a short time. Please wait a minute before trying again.';
+    }
+    if (lower.includes('expired') || lower.includes('otp_expired') || lower.includes('invalid token')) {
+      return 'This verification or password reset link has expired or is invalid. Please request a new one.';
+    }
+    return raw;
+  }
+
+  function cleanAuthRedirectUrl() {
+    try {
+      const cleanUrl = new URL(window.location.href);
+      const authParams = ['code', 'token_hash', 'type', 'error', 'error_code', 'error_description'];
+      let modified = false;
+      authParams.forEach((p) => {
+        if (cleanUrl.searchParams.has(p)) {
+          cleanUrl.searchParams.delete(p);
+          modified = true;
+        }
+      });
+      if (cleanUrl.hash && /(access_token|refresh_token|type=|error=)/i.test(cleanUrl.hash)) {
+        cleanUrl.hash = '';
+        modified = true;
+      }
+      if (modified) {
+        window.history.replaceState({}, document.title, cleanUrl.toString());
+      }
+    } catch {
+      // Ignore history errors in restricted contexts
+    }
+  }
+
+  function applyActiveViewDOM(viewName) {
     activeView = viewName;
     document.querySelectorAll('.view-section').forEach((sec) => {
       sec.classList.toggle('active', sec.id === 'view-' + viewName);
@@ -465,13 +681,55 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
       nav.classList.remove('mobile-open');
       if (mobileBtn) mobileBtn.setAttribute('aria-expanded', 'false');
     }
+    try {
+      if (viewName !== 'auth') {
+        window.sessionStorage.setItem(LAST_VIEW_KEY, viewName);
+      }
+    } catch {
+      // Ignore storage blocks
+    }
     if (viewName === 'charts') {
       setTimeout(renderAllCharts, 40);
+    }
+    if (viewName === 'realdata') {
+      if (!realFloodState.initialized && !realFloodState.loading) {
+        loadRealFloodData({ refreshMetadata: !realFloodState.metadataLoaded });
+      } else {
+        renderRealFloodDataView();
+      }
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
+  function switchView(viewName, options) {
+    const opts = options || {};
+    if (PROTECTED_VIEWS.has(viewName) && !isAuthenticated()) {
+      authState.pendingProtectedView = viewName;
+      if (authState.recoveryActive) {
+        setAuthMode('recovery', true);
+        showAuthFeedback('Please complete setting your new password before accessing the dashboard.', 'info');
+      } else {
+        setAuthMode('login', false);
+        showAuthFeedback(
+          opts.gateMessage || 'Authentication required: Please sign in or create an account to access the monitoring dashboard.',
+          'info'
+        );
+      }
+      applyActiveViewDOM('auth');
+      return;
+    }
+
+    if (viewName === 'auth' && !authState.recoveryActive && isAuthenticated()) {
+      applyActiveViewDOM('dashboard');
+      return;
+    }
+
+    applyActiveViewDOM(viewName);
+  }
+
   function updateRoleUI() {
+    // Note: Role / View selector controls UI terminology & local sandbox preview ONLY.
+    // It is strictly NOT authentication and grants zero database/admin privileges.
     const role = appState.config.role;
     const roleSelector = document.getElementById('roleSelector');
     if (roleSelector) roleSelector.value = role;
@@ -481,16 +739,16 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
     const adminNotice = document.getElementById('adminRoleNotice');
 
     if (role === 'resident') {
-      if (tagEl) tagEl.textContent = 'NYC Resident View';
+      if (tagEl) tagEl.textContent = 'NYC Resident View (Display Mode)';
       if (descEl) descEl.textContent = 'Plain-language street flood status, neighborhood water levels, and travel safety advisories.';
       if (adminNotice) adminNotice.style.display = 'flex';
     } else if (role === 'operator') {
-      if (tagEl) tagEl.textContent = 'Monitoring Personnel View';
+      if (tagEl) tagEl.textContent = 'Monitoring Personnel View (Display Mode)';
       if (descEl) descEl.textContent = 'Operational telemetry diagnostics, ultrasonic echo metrics, historical trends, and alert acknowledgment.';
       if (adminNotice) adminNotice.style.display = 'flex';
     } else {
-      if (tagEl) tagEl.textContent = 'System Administrator View';
-      if (descEl) descEl.textContent = 'Full CRUD access enabled for monitoring locations, sensor hardware parameters, and flood thresholds.';
+      if (tagEl) tagEl.textContent = 'Admin Sandbox View (UI Preview Only)';
+      if (descEl) descEl.textContent = 'Local prototype CRUD preview mode (does not authenticate or grant Supabase database admin privileges).';
       if (adminNotice) adminNotice.style.display = 'none';
     }
 
@@ -508,6 +766,7 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
   function renderAll() {
     synchronizeAlerts(false);
     updateRoleUI();
+    updateAuthUI();
     renderTopStatusAndTicker();
     renderSupabaseStatusBar();
     renderSupabasePanel();
@@ -884,6 +1143,575 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
     }
   }
 
+  /* --------------------------------------------------------------------------
+   * 6C. REAL NYC FLOOD DATA (NYC OPEN DATA FLOODNET API + METADATA JOIN)
+   * -------------------------------------------------------------------------- */
+  function populateRealDataFilterOptions() {
+    const boroughSel = document.getElementById('realDataBoroughFilter');
+    const sensorSel = document.getElementById('realDataSensorFilter');
+
+    if (boroughSel) {
+      const prevBorough = realFloodState.borough || 'ALL';
+      const boroughOptions = realFloodState.boroughs.length > 0
+        ? realFloodState.boroughs
+        : ['Bronx', 'Brooklyn', 'Manhattan', 'Queens', 'Staten Island'];
+      boroughSel.innerHTML =
+        `<option value="ALL">All Boroughs</option>` +
+        boroughOptions.map((b) => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join('');
+      boroughSel.value = prevBorough;
+    }
+
+    if (sensorSel) {
+      const activeBorough = realFloodState.borough || 'ALL';
+      const prevSensor = realFloodState.sensorId || 'ALL';
+      const filteredSensors = realFloodState.sensorsList.filter(
+        (s) => activeBorough === 'ALL' || s.borough === activeBorough
+      );
+      sensorSel.innerHTML =
+        `<option value="ALL">All FloodNet Sensors (${filteredSensors.length})</option>` +
+        filteredSensors
+          .map((s) => {
+            const locHint = s.streetName ? ` — ${s.streetName}` : s.borough ? ` (${s.borough})` : '';
+            return `<option value="${escapeHtml(s.sensorId)}">${escapeHtml(s.sensorName)}${escapeHtml(locHint)}</option>`;
+          })
+          .join('');
+      const stillExists = filteredSensors.some((s) => s.sensorId === prevSensor);
+      if (stillExists) {
+        sensorSel.value = prevSensor;
+      } else {
+        realFloodState.sensorId = 'ALL';
+        sensorSel.value = 'ALL';
+      }
+    }
+  }
+
+  function formatRealFloodDate(isoString) {
+    if (!isoString) return '—';
+    const d = new Date(isoString);
+    if (Number.isNaN(d.getTime())) return String(isoString);
+    return d.toLocaleString([], {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  }
+
+  function formatDurationMinutes(mins) {
+    if (mins == null || Number.isNaN(mins)) return '—';
+    const num = Number(mins);
+    const rounded = Number.isInteger(num) ? String(num) : num.toFixed(2).replace(/\.?0+$/, '');
+    if (num >= 60) {
+      const hrs = Math.floor(num / 60);
+      const rem = Math.round(num % 60);
+      return `${rounded} mins (${hrs}h ${rem}m)`;
+    }
+    return `${rounded} mins`;
+  }
+
+  function renderRealFloodDataView() {
+    const loadingBox = document.getElementById('realDataLoadingBox');
+    const errorBox = document.getElementById('realDataErrorBox');
+    const errorText = document.getElementById('realDataErrorText');
+    const emptyBox = document.getElementById('realDataEmptyBox');
+    const tableWrap = document.getElementById('realDataTableWrap');
+    const tbody = document.getElementById('realDataTableBody');
+    const syncMeta = document.getElementById('realDataSyncMeta');
+    const apiUpdatedMeta = document.getElementById('realDataApiUpdatedMeta');
+    const latestEventMeta = document.getElementById('realDataLatestEventMeta');
+
+    const kpiTotal = document.getElementById('realDataKpiTotal');
+    const kpiTotalMeta = document.getElementById('realDataKpiTotalMeta');
+    const kpiSensors = document.getElementById('realDataKpiSensors');
+    const kpiPeakDepth = document.getElementById('realDataKpiPeakDepth');
+    const kpiPeakSensor = document.getElementById('realDataKpiPeakSensor');
+    const kpiRange = document.getElementById('realDataKpiRange');
+    const kpiPageMeta = document.getElementById('realDataKpiPageMeta');
+    const activeSummary = document.getElementById('realDataActiveSummary');
+    const offsetInfo = document.getElementById('realDataOffsetInfo');
+    const pageIndicator = document.getElementById('realDataPageIndicator');
+    const jumpInput = document.getElementById('realDataJumpPageInput');
+
+    if (!tbody) return;
+
+    if (loadingBox) loadingBox.classList.toggle('hidden', !realFloodState.loading);
+    if (errorBox) errorBox.classList.toggle('hidden', !realFloodState.error || realFloodState.loading);
+    if (errorText && realFloodState.error) errorText.textContent = realFloodState.error;
+
+    const refreshBtn = document.getElementById('btnRefreshRealData');
+    setButtonBusy(refreshBtn, 'Refreshing...', realFloodState.loading);
+
+    if (apiUpdatedMeta) {
+      apiUpdatedMeta.textContent = realFloodState.apiUpdatedAtIso
+        ? `API Dataset Updated: ${formatRealFloodDate(realFloodState.apiUpdatedAtIso)}`
+        : 'API Dataset Updated: Checking...';
+    }
+    if (latestEventMeta) {
+      latestEventMeta.textContent = realFloodState.latestRecordedEventIso
+        ? `Latest Historical Event: ${formatRealFloodDate(realFloodState.latestRecordedEventIso)}`
+        : 'Latest Historical Event: —';
+    }
+
+    if (syncMeta) {
+      if (realFloodState.loading) {
+        syncMeta.textContent = 'Fetching NYC Open Data...';
+      } else if (realFloodState.lastFetchedMs) {
+        const lat = realFloodState.latencyMs != null ? ` (${realFloodState.latencyMs} ms)` : '';
+        syncMeta.textContent = `Archive fetched: ${new Date(realFloodState.lastFetchedMs).toLocaleTimeString()}${lat}`;
+      } else if (realFloodState.error) {
+        syncMeta.textContent = 'API sync failed';
+      }
+    }
+
+    if (kpiTotal) {
+      kpiTotal.textContent = realFloodState.initialized ? realFloodState.totalCount.toLocaleString() : '—';
+    }
+    if (kpiTotalMeta) {
+      kpiTotalMeta.textContent = realFloodState.search || realFloodState.borough !== 'ALL' || realFloodState.sensorId !== 'ALL' || realFloodState.startDate || realFloodState.endDate
+        ? 'Filtered historical events'
+        : 'All historical FloodNet events';
+    }
+    if (kpiSensors) {
+      kpiSensors.textContent = realFloodState.metadataLoaded ? realFloodState.sensorsList.length.toLocaleString() : '—';
+    }
+
+    // Peak depth on current page (exact reported inches)
+    const rowsWithDepth = realFloodState.records.filter((r) => typeof r.maxDepthInches === 'number');
+    if (rowsWithDepth.length > 0) {
+      const peakRow = rowsWithDepth.reduce((best, cur) => (cur.maxDepthInches > best.maxDepthInches ? cur : best), rowsWithDepth[0]);
+      if (kpiPeakDepth) kpiPeakDepth.textContent = `${peakRow.maxDepthInches.toFixed(2)} in`;
+      if (kpiPeakSensor) kpiPeakSensor.textContent = `${peakRow.sensorName} (${peakRow.borough || 'NYC'})`;
+    } else {
+      if (kpiPeakDepth) kpiPeakDepth.textContent = '—';
+      if (kpiPeakSensor) kpiPeakSensor.textContent = 'No depth measurements on page';
+    }
+
+    const total = realFloodState.totalCount;
+    const offset = (realFloodState.page - 1) * realFloodState.pageSize;
+    const startIdx = total === 0 ? 0 : offset + 1;
+    const endIdx = Math.min(total, offset + realFloodState.records.length);
+
+    if (kpiRange) {
+      kpiRange.textContent = total > 0 ? `${startIdx.toLocaleString()}–${endIdx.toLocaleString()}` : '0';
+    }
+    if (kpiPageMeta) {
+      kpiPageMeta.textContent = total > 0
+        ? `Page ${realFloodState.page} of ${realFloodState.totalPages.toLocaleString()} (of ${total.toLocaleString()})`
+        : 'No matching pages';
+    }
+
+    const hasNoResults = !realFloodState.loading && !realFloodState.error && realFloodState.initialized && realFloodState.records.length === 0;
+    if (emptyBox) emptyBox.classList.toggle('hidden', !hasNoResults);
+    if (tableWrap) {
+      tableWrap.classList.toggle('hidden', (realFloodState.error && realFloodState.records.length === 0) || hasNoResults);
+    }
+
+    if (activeSummary) {
+      const parts = [];
+      if (realFloodState.borough !== 'ALL') parts.push(realFloodState.borough);
+      if (realFloodState.search) parts.push(`Search: "${realFloodState.search}"`);
+      if (realFloodState.startDate || realFloodState.endDate) {
+        parts.push(`Dates: ${realFloodState.startDate || 'Start'} to ${realFloodState.endDate || 'Latest'}`);
+      }
+      activeSummary.textContent = parts.length > 0
+        ? `Historical Flood Events (${parts.join(' • ')})`
+        : 'Historical Flood Events (Newest Recorded First)';
+    }
+
+    if (offsetInfo) {
+      offsetInfo.textContent = total > 0
+        ? `Showing ${startIdx.toLocaleString()}–${endIdx.toLocaleString()} of ${total.toLocaleString()} • API Offset: ${offset.toLocaleString()}`
+        : 'Offset: 0';
+    }
+
+    const savedKeySet = new Set(savedEventsState.events.map((ev) => ev.eventKey));
+    const authed = isAuthenticated();
+
+    if (realFloodState.records.length > 0) {
+      tbody.innerHTML = realFloodState.records
+        .map((rec, idx) => {
+          const depthNum = rec.maxDepthInches;
+          const depthClass =
+            depthNum != null && depthNum >= 12
+              ? 'realdata-depth-crit'
+              : depthNum != null && depthNum >= 4
+              ? 'realdata-depth-warn'
+              : 'realdata-depth-normal';
+
+          const depthText = depthNum != null ? `${depthNum.toFixed(2)} in` : '—';
+          const depthSub = depthNum != null ? `${(depthNum * 2.54).toFixed(1)} cm` : '';
+          const locationStreet = rec.streetName || 'Location metadata unavailable';
+          const boroughBadge = rec.borough
+            ? `<span class="borough-chip" style="margin-bottom:2px;">${escapeHtml(rec.borough)}</span>`
+            : `<span class="borough-chip" style="margin-bottom:2px;">NYC</span>`;
+          const metaExtras = [
+            rec.zipcode ? `ZIP ${escapeHtml(rec.zipcode)}` : '',
+            rec.tidallyInfluenced && rec.tidallyInfluenced.toLowerCase() === 'yes' ? 'Tidally Influenced' : '',
+            rec.latitude != null && rec.longitude != null ? `${rec.latitude.toFixed(4)}, ${rec.longitude.toFixed(4)}` : ''
+          ]
+            .filter(Boolean)
+            .join(' • ');
+
+          const timingParts = [
+            rec.onsetTimeMins != null ? `Onset: ${rec.onsetTimeMins}m` : '',
+            rec.drainTimeMins != null ? `Drain: ${rec.drainTimeMins}m` : ''
+          ]
+            .filter(Boolean)
+            .join(' • ');
+
+          const eventKey = buildFloodEventKey(rec.sensorId, rec.floodStartTime);
+          const isSaved = savedKeySet.has(eventKey);
+          const isSaving = savedEventsState.savingKeys.has(eventKey);
+
+          let actionHtml;
+          if (!authed) {
+            actionHtml = `<button type="button" class="btn btn-sm btn-outline js-save-flood-event" data-index="${idx}" title="Sign in to bookmark this historical flood event">Save Event</button>`;
+          } else if (isSaved) {
+            actionHtml = `<button type="button" class="btn btn-sm btn-saved" disabled title="Already bookmarked in My Saved Historical Flood Events">Saved ✓</button>`;
+          } else if (isSaving) {
+            actionHtml = `<button type="button" class="btn btn-sm btn-cyan" disabled>Saving...</button>`;
+          } else {
+            actionHtml = `<button type="button" class="btn btn-sm btn-cyan js-save-flood-event" data-index="${idx}">Save Event</button>`;
+          }
+
+          return `
+            <tr>
+              <td>
+                <div style="font-weight:800;color:var(--navy-900);">${escapeHtml(rec.sensorName)}</div>
+                <div style="font-family:var(--font-mono);font-size:0.72rem;color:var(--gray-500);">${escapeHtml(rec.sensorId)}</div>
+              </td>
+              <td>
+                ${boroughBadge}
+                <div style="font-weight:600;color:var(--gray-800);">${escapeHtml(locationStreet)}</div>
+                ${metaExtras ? `<div style="font-size:0.73rem;color:var(--gray-500);">${metaExtras}</div>` : ''}
+              </td>
+              <td>
+                <div style="font-weight:700;color:var(--navy-900);font-family:var(--font-mono);font-size:0.8rem;">
+                  ${escapeHtml(formatRealFloodDate(rec.floodStartTime))}
+                </div>
+                ${rec.floodEndTime ? `<div style="font-size:0.72rem;color:var(--gray-500);">Ended: ${escapeHtml(formatRealFloodDate(rec.floodEndTime))}</div>` : ''}
+              </td>
+              <td class="num-col">
+                <span class="realdata-depth-pill ${depthClass}">${escapeHtml(depthText)}</span>
+                ${depthSub ? `<div style="font-size:0.71rem;color:var(--gray-500);margin-top:2px;">${escapeHtml(depthSub)}</div>` : ''}
+              </td>
+              <td class="num-col">
+                <div style="font-weight:700;color:var(--navy-900);">${escapeHtml(formatDurationMinutes(rec.durationMins))}</div>
+                ${timingParts ? `<div style="font-size:0.71rem;color:var(--gray-500);">${escapeHtml(timingParts)}</div>` : ''}
+              </td>
+              <td>${actionHtml}</td>
+            </tr>
+          `;
+        })
+        .join('');
+    } else if (!realFloodState.loading) {
+      tbody.innerHTML = '';
+    }
+
+    // Pagination buttons state
+    const curPage = realFloodState.page;
+    const maxPage = Math.max(1, realFloodState.totalPages);
+    if (pageIndicator) {
+      pageIndicator.textContent = `Page ${curPage.toLocaleString()} of ${maxPage.toLocaleString()}`;
+    }
+    if (jumpInput) {
+      jumpInput.max = String(maxPage);
+      jumpInput.value = String(curPage);
+    }
+
+    const firstBtn = document.getElementById('btnRealPageFirst');
+    const prevBtn = document.getElementById('btnRealPagePrev');
+    const nextBtn = document.getElementById('btnRealPageNext');
+    const lastBtn = document.getElementById('btnRealPageLast');
+    const jump1000Btn = document.getElementById('btnJumpPast1000');
+
+    if (firstBtn) firstBtn.disabled = realFloodState.loading || curPage <= 1;
+    if (prevBtn) prevBtn.disabled = realFloodState.loading || curPage <= 1;
+    if (nextBtn) nextBtn.disabled = realFloodState.loading || curPage >= maxPage;
+    if (lastBtn) lastBtn.disabled = realFloodState.loading || curPage >= maxPage;
+    if (jump1000Btn) {
+      const target1000Page = Math.floor(1000 / realFloodState.pageSize) + 1;
+      jump1000Btn.disabled = realFloodState.loading || total <= 1000 || curPage === target1000Page;
+      jump1000Btn.title = total > 1000
+        ? `Jump to Page ${target1000Page} (records starting at #1,001)`
+        : 'Current filtered result has 1,000 or fewer total records';
+    }
+
+    renderSavedFloodEventsPanel();
+  }
+
+  function renderSavedFloodEventsPanel() {
+    const body = document.getElementById('savedEventsPanelBody');
+    const countBadge = document.getElementById('savedEventsCountBadge');
+    if (!body) return;
+
+    const authed = isAuthenticated();
+    if (countBadge) {
+      countBadge.className = 'status-badge';
+      if (!authed) {
+        countBadge.classList.add('badge-stale');
+        countBadge.textContent = 'Sign In Required';
+      } else if (savedEventsState.status === 'migration_required') {
+        countBadge.classList.add('badge-warning');
+        countBadge.textContent = 'SQL Migration Needed';
+      } else {
+        countBadge.classList.add('badge-normal');
+        countBadge.textContent = `${savedEventsState.events.length} Saved`;
+      }
+    }
+
+    if (!authed) {
+      body.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <p style="font-size:0.86rem;color:var(--gray-700);">
+            Sign in with your Supabase account to bookmark selected historical NYC FloodNet events and access them across refreshes.
+          </p>
+          <button type="button" class="btn btn-sm btn-cyan js-saved-signin-cta">Sign In to Save Events</button>
+        </div>
+      `;
+      return;
+    }
+
+    if (savedEventsState.loading && savedEventsState.events.length === 0) {
+      body.innerHTML = `<p style="font-size:0.85rem;color:var(--gray-500);">Loading your saved flood event bookmarks from Supabase...</p>`;
+      return;
+    }
+
+    if (savedEventsState.status === 'migration_required') {
+      body.innerHTML = `
+        <div class="station-guidance guidance-warning">
+          <strong>Database Setup Required:</strong> ${escapeHtml(savedEventsState.errorMessage)}
+        </div>
+      `;
+      return;
+    }
+
+    if (savedEventsState.status === 'error') {
+      body.innerHTML = `
+        <div class="station-guidance guidance-critical">
+          <strong>Unable to load saved bookmarks:</strong> ${escapeHtml(savedEventsState.errorMessage)}
+        </div>
+      `;
+      return;
+    }
+
+    if (savedEventsState.events.length === 0) {
+      body.innerHTML = `
+        <p style="font-size:0.86rem;color:var(--gray-600);">
+          You have no saved flood event bookmarks yet. Click <strong>Save Event</strong> on any historical FloodNet row above to bookmark it to your account.
+        </p>
+      `;
+      return;
+    }
+
+    body.innerHTML = `
+      <div class="table-responsive">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Sensor &amp; Location</th>
+              <th>Flood Start Date</th>
+              <th class="num-col">Max Depth</th>
+              <th class="num-col">Duration</th>
+              <th>Bookmarked At</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${savedEventsState.events
+              .map((ev) => {
+                const locText = [ev.borough, ev.streetName, ev.zipcode ? `ZIP ${ev.zipcode}` : '']
+                  .filter(Boolean)
+                  .join(' • ');
+                const depthText = ev.maxDepthInches != null ? `${Number(ev.maxDepthInches).toFixed(2)} in` : '—';
+                const savedAt = ev.createdAt ? new Date(ev.createdAt).toLocaleString() : '—';
+                return `
+                  <tr>
+                    <td>
+                      <div style="font-weight:800;color:var(--navy-900);">${escapeHtml(ev.sensorName)}</div>
+                      <div style="font-size:0.76rem;color:var(--gray-600);">${escapeHtml(locText || ev.sensorId)}</div>
+                    </td>
+                    <td style="font-family:var(--font-mono);font-size:0.78rem;">${escapeHtml(formatRealFloodDate(ev.floodStartTime))}</td>
+                    <td class="num-col"><strong>${escapeHtml(depthText)}</strong></td>
+                    <td class="num-col">${escapeHtml(formatDurationMinutes(ev.durationMins))}</td>
+                    <td style="font-family:var(--font-mono);font-size:0.74rem;color:var(--gray-500);">${escapeHtml(savedAt)}</td>
+                    <td>
+                      <button type="button" class="btn btn-sm btn-danger js-delete-saved-event" data-saved-id="${escapeHtml(ev.id)}">Remove</button>
+                    </td>
+                  </tr>
+                `;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  async function loadSavedFloodEvents(showToastOnError) {
+    if (!isAuthenticated()) {
+      savedEventsState.status = 'unauthenticated';
+      savedEventsState.events = [];
+      savedEventsState.errorMessage = '';
+      renderRealFloodDataView();
+      return;
+    }
+
+    savedEventsState.loading = true;
+    renderSavedFloodEventsPanel();
+
+    try {
+      const res = await fetchSavedFloodEvents();
+      savedEventsState.status = res.status;
+      savedEventsState.events = res.events || [];
+      savedEventsState.errorMessage = res.errorMessage || '';
+      if (showToastOnError && res.status !== 'ok') {
+        showToast(res.errorMessage || 'Could not load saved flood events.', 'WARNING');
+      }
+    } catch (err) {
+      savedEventsState.status = 'error';
+      savedEventsState.errorMessage = err instanceof Error ? err.message : 'Unable to fetch saved flood events.';
+    } finally {
+      savedEventsState.loading = false;
+      renderRealFloodDataView();
+    }
+  }
+
+  async function handleSaveFloodEvent(recordIndex) {
+    const rec = realFloodState.records[recordIndex];
+    if (!rec) return;
+
+    if (!isAuthenticated()) {
+      authState.pendingProtectedView = 'realdata';
+      setAuthMode('login', false);
+      showAuthFeedback('Sign in to bookmark historical flood events in your Supabase account.', 'info');
+      applyActiveViewDOM('auth');
+      return;
+    }
+
+    const eventKey = buildFloodEventKey(rec.sensorId, rec.floodStartTime);
+    if (savedEventsState.events.some((ev) => ev.eventKey === eventKey)) {
+      showToast('This flood event is already bookmarked in your saved list.', 'NORMAL');
+      return;
+    }
+
+    savedEventsState.savingKeys.add(eventKey);
+    renderRealFloodDataView();
+
+    try {
+      const res = await saveFloodEventBookmark(rec);
+      if (res.status === 'ok' && res.event) {
+        savedEventsState.status = 'ok';
+        savedEventsState.errorMessage = '';
+        savedEventsState.events.unshift(res.event);
+        showToast(`Saved "${rec.sensorName}" flood event to your Supabase bookmarks.`, 'NORMAL');
+      } else if (res.status === 'duplicate') {
+        await loadSavedFloodEvents(false);
+        showToast(res.errorMessage, 'WARNING');
+      } else {
+        showToast(res.errorMessage || 'Unable to save flood event.', 'CRITICAL');
+      }
+    } finally {
+      savedEventsState.savingKeys.delete(eventKey);
+      renderRealFloodDataView();
+    }
+  }
+
+  async function handleDeleteSavedEvent(savedId) {
+    if (!isAuthenticated()) return;
+    const numericId = Number(savedId);
+    const res = await deleteSavedFloodEvent(numericId);
+    if (res.status === 'ok') {
+      savedEventsState.events = savedEventsState.events.filter((ev) => Number(ev.id) !== numericId);
+      renderRealFloodDataView();
+      showToast('Removed flood event bookmark.', 'NORMAL');
+    } else {
+      showToast(res.errorMessage || 'Unable to delete saved flood event.', 'CRITICAL');
+    }
+  }
+
+  async function loadRealFloodData(options = {}) {
+    const { refreshMetadata = false, showToastOnDone = false } = options;
+
+    if (simulatedOffline || !navigator.onLine) {
+      realFloodState.loading = false;
+      realFloodState.error = 'No active internet connection detected. Restore connectivity to fetch NYC Open Data records.';
+      renderRealFloodDataView();
+      return;
+    }
+
+    if (realFloodState.abortController) {
+      realFloodState.abortController.abort();
+    }
+    const controller = new AbortController();
+    realFloodState.abortController = controller;
+    realFloodState.loading = true;
+    realFloodState.error = '';
+    renderRealFloodDataView();
+
+    try {
+      if (!realFloodState.metadataLoaded || refreshMetadata) {
+        const metaResult = await fetchFloodNetSensorMetadata({ signal: controller.signal });
+        realFloodState.sensorsList = metaResult.sensorsList;
+        realFloodState.sensorById = metaResult.sensorById;
+        realFloodState.boroughs = metaResult.boroughs;
+        if (metaResult.apiUpdatedAtIso) {
+          realFloodState.apiUpdatedAtIso = metaResult.apiUpdatedAtIso;
+        }
+        if (metaResult.latestRecordedEventIso) {
+          realFloodState.latestRecordedEventIso = metaResult.latestRecordedEventIso;
+        }
+        realFloodState.metadataLoaded = true;
+        populateRealDataFilterOptions();
+      }
+
+      const eventsResult = await fetchFloodNetEvents({
+        search: realFloodState.search,
+        sensorId: realFloodState.sensorId,
+        borough: realFloodState.borough,
+        startDate: realFloodState.startDate,
+        endDate: realFloodState.endDate,
+        page: realFloodState.page,
+        pageSize: realFloodState.pageSize,
+        sensorsList: realFloodState.sensorsList,
+        sensorById: realFloodState.sensorById,
+        signal: controller.signal
+      });
+
+      realFloodState.records = eventsResult.records;
+      realFloodState.totalCount = eventsResult.totalCount;
+      realFloodState.totalPages = eventsResult.totalPages;
+      realFloodState.page = eventsResult.page;
+      realFloodState.latencyMs = eventsResult.latencyMs;
+      realFloodState.lastFetchedMs = eventsResult.fetchedAtMs;
+      realFloodState.initialized = true;
+      realFloodState.error = '';
+
+      if (showToastOnDone) {
+        showToast(
+          `Loaded ${eventsResult.records.length} historical NYC FloodNet records (${eventsResult.totalCount.toLocaleString()} total matching)`,
+          'NORMAL'
+        );
+      }
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        return;
+      }
+      realFloodState.error = err instanceof Error
+        ? err.message
+        : 'Failed to retrieve records from NYC Open Data API.';
+      if (showToastOnDone) {
+        showToast(`NYC Open Data API error: ${realFloodState.error}`, 'CRITICAL');
+      }
+    } finally {
+      if (realFloodState.abortController === controller) {
+        realFloodState.loading = false;
+        renderRealFloodDataView();
+      }
+    }
+  }
+
   function buildStationCardHTML(st) {
     const staleLimit = appState.config.staleTimeoutSec;
     const status = evaluateStationStatus(st, st.waterDepthIn, st.lastUpdatedMs, staleLimit);
@@ -956,6 +1784,7 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
           <div class="station-card-top">
             <div>
               <span class="borough-chip">${st.borough}</span>
+              <span class="dataset-badge dataset-badge-sim" style="font-size:0.62rem;padding:2px 7px;margin-left:4px;">SIMULATED DEMO DATA</span>
               <h3 class="station-name">${st.name}</h3>
               <div class="station-street">${st.street}</div>
             </div>
@@ -1826,13 +2655,276 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
       });
     }
 
-    // Role Selector & Persona Cards
+    // Authentication Header & Portal Controls
+    document.getElementById('btnHeaderSignIn')?.addEventListener('click', () => {
+      setAuthMode('login', false);
+      applyActiveViewDOM('auth');
+    });
+
+    document.getElementById('btnAuthBackHome')?.addEventListener('click', () => {
+      switchView('home');
+    });
+
+    document.getElementById('btnHeaderLogout')?.addEventListener('click', async () => {
+      const logoutBtn = document.getElementById('btnHeaderLogout');
+      setButtonBusy(logoutBtn, 'Signing out...', true);
+      const { error } = await signOutUser();
+      setButtonBusy(logoutBtn, 'Logout', false);
+      if (error) {
+        showToast(`Sign out failed: ${mapAuthError(error)}`, 'CRITICAL');
+        return;
+      }
+      authState.session = null;
+      authState.user = null;
+      authState.recoveryActive = false;
+      authState.pendingProtectedView = null;
+      try {
+        window.sessionStorage.removeItem(LAST_VIEW_KEY);
+      } catch {
+        // Ignore storage blocks
+      }
+      updateAuthUI();
+      if (PROTECTED_VIEWS.has(activeView)) {
+        setAuthMode('login', false);
+        showAuthFeedback('You have been signed out. Sign in again to access the monitoring dashboard.', 'info');
+        applyActiveViewDOM('auth');
+      }
+      showToast('Signed out of NYC FloodGuard', 'NORMAL');
+    });
+
+    document.querySelectorAll('.auth-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const mode = tab.getAttribute('data-auth-mode');
+        if (mode) setAuthMode(mode, false);
+      });
+    });
+
+    document.getElementById('btnGoForgotFromLogin')?.addEventListener('click', () => setAuthMode('forgot', false));
+    document.getElementById('btnGoSignUpFromLogin')?.addEventListener('click', () => setAuthMode('signup', false));
+    document.getElementById('btnBackToLoginFromForgot')?.addEventListener('click', () => setAuthMode('login', false));
+    document.getElementById('btnVerifyBackToLogin')?.addEventListener('click', () => setAuthMode('login', false));
+
+    document.querySelectorAll('.js-toggle-password').forEach((toggleBtn) => {
+      toggleBtn.addEventListener('click', () => {
+        const targetId = toggleBtn.getAttribute('data-target');
+        const input = targetId ? document.getElementById(targetId) : null;
+        if (!input) return;
+        const isHidden = input.type === 'password';
+        input.type = isHidden ? 'text' : 'password';
+        toggleBtn.textContent = isHidden ? 'Hide' : 'Show';
+      });
+    });
+
+    // Sign In Form Submit
+    document.getElementById('authLoginForm')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = (document.getElementById('authLoginEmail')?.value || '').trim();
+      const password = document.getElementById('authLoginPassword')?.value || '';
+      const submitBtn = document.getElementById('btnLoginSubmit');
+
+      if (!isValidEmail(email)) {
+        showAuthFeedback('Please enter a valid email address.', 'error');
+        return;
+      }
+      if (!password) {
+        showAuthFeedback('Please enter your password.', 'error');
+        return;
+      }
+
+      showAuthFeedback('', 'info');
+      setButtonBusy(submitBtn, 'Signing in...', true);
+      try {
+        const { data, error } = await signInWithEmail({ email, password });
+        if (error) {
+          showAuthFeedback(mapAuthError(error), 'error');
+          return;
+        }
+        if (data?.session && data?.user) {
+          authState.session = data.session;
+          authState.user = data.user;
+          authState.recoveryActive = false;
+          updateAuthUI();
+          loadSupabaseData(false);
+          loadSavedFloodEvents(false);
+          const targetView = authState.pendingProtectedView || 'dashboard';
+          authState.pendingProtectedView = null;
+          switchView(targetView);
+          showToast(`Welcome back, ${getUserDisplayName(data.user)}!`, 'NORMAL');
+        }
+      } catch (err) {
+        showAuthFeedback(mapAuthError(err), 'error');
+      } finally {
+        setButtonBusy(submitBtn, 'Sign In to Monitoring Dashboard', false);
+      }
+    });
+
+    // Sign Up Form Submit
+    document.getElementById('authSignUpForm')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fullName = (document.getElementById('authSignUpName')?.value || '').trim();
+      const email = (document.getElementById('authSignUpEmail')?.value || '').trim();
+      const password = document.getElementById('authSignUpPassword')?.value || '';
+      const confirmPassword = document.getElementById('authSignUpConfirmPassword')?.value || '';
+      const submitBtn = document.getElementById('btnSignUpSubmit');
+
+      if (fullName.length < 2) {
+        showAuthFeedback('Please enter your full name (at least 2 characters).', 'error');
+        return;
+      }
+      if (!isValidEmail(email)) {
+        showAuthFeedback('Please enter a valid email address.', 'error');
+        return;
+      }
+      if (password.length < 6) {
+        showAuthFeedback('Password must be at least 6 characters long.', 'error');
+        return;
+      }
+      if (password !== confirmPassword) {
+        showAuthFeedback('Passwords do not match. Please re-enter both password fields.', 'error');
+        return;
+      }
+
+      showAuthFeedback('', 'info');
+      setButtonBusy(submitBtn, 'Creating account...', true);
+      try {
+        const { data, error } = await signUpWithEmail({ fullName, email, password });
+        if (error) {
+          showAuthFeedback(mapAuthError(error), 'error');
+          return;
+        }
+
+        // When email confirmation is enabled, Supabase returns a user with empty identities if already registered
+        if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+          showAuthFeedback('An account with this email may already exist. Try signing in or using Forgot Password.', 'info');
+          return;
+        }
+
+        if (data?.session && data?.user) {
+          authState.session = data.session;
+          authState.user = data.user;
+          updateAuthUI();
+          loadSupabaseData(false);
+          const targetView = authState.pendingProtectedView || 'dashboard';
+          authState.pendingProtectedView = null;
+          switchView(targetView);
+          showToast(`Account created! Welcome, ${fullName}.`, 'NORMAL');
+        } else {
+          authState.pendingEmailForVerify = email;
+          const verifyMsg = document.getElementById('authVerifyMessage');
+          if (verifyMsg) {
+            verifyMsg.innerHTML = `Account created for <strong>${escapeHtml(fullName)}</strong>! A verification link has been sent to <strong>${escapeHtml(email)}</strong>. Click the link in your email to verify your account before signing in.`;
+          }
+          document.getElementById('authSignUpForm')?.reset();
+          setAuthMode('verify', true);
+          showAuthFeedback('Registration successful — email verification required before sign in.', 'success');
+        }
+      } catch (err) {
+        showAuthFeedback(mapAuthError(err), 'error');
+      } finally {
+        setButtonBusy(submitBtn, 'Create FloodGuard Account', false);
+      }
+    });
+
+    // Resend Verification Email
+    document.getElementById('btnResendVerification')?.addEventListener('click', async () => {
+      const email = authState.pendingEmailForVerify || (document.getElementById('authLoginEmail')?.value || '').trim();
+      if (!isValidEmail(email)) {
+        showAuthFeedback('Enter your email address on the Sign In tab first to resend verification.', 'error');
+        return;
+      }
+      const btn = document.getElementById('btnResendVerification');
+      setButtonBusy(btn, 'Sending...', true);
+      try {
+        const { error } = await resendVerificationEmail(email);
+        if (error) {
+          showAuthFeedback(mapAuthError(error), 'error');
+        } else {
+          showAuthFeedback(`Verification email re-sent to ${email}.`, 'success');
+        }
+      } finally {
+        setButtonBusy(btn, 'Resend Verification Email', false);
+      }
+    });
+
+    // Forgot Password Form Submit
+    document.getElementById('authForgotForm')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = (document.getElementById('authForgotEmail')?.value || '').trim();
+      const submitBtn = document.getElementById('btnForgotSubmit');
+
+      if (!isValidEmail(email)) {
+        showAuthFeedback('Please enter a valid email address.', 'error');
+        return;
+      }
+
+      showAuthFeedback('', 'info');
+      setButtonBusy(submitBtn, 'Sending reset link...', true);
+      try {
+        const { error } = await sendPasswordResetEmail(email);
+        if (error) {
+          showAuthFeedback(mapAuthError(error), 'error');
+          return;
+        }
+        showAuthFeedback(
+          `Password reset email sent to ${email}. Check your inbox and open the link to choose a new password.`,
+          'success'
+        );
+      } catch (err) {
+        showAuthFeedback(mapAuthError(err), 'error');
+      } finally {
+        setButtonBusy(submitBtn, 'Send Password Reset Link', false);
+      }
+    });
+
+    // Password Recovery (Set New Password) Submit
+    document.getElementById('authRecoveryForm')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const newPassword = document.getElementById('authRecoveryNewPassword')?.value || '';
+      const confirmPassword = document.getElementById('authRecoveryConfirmPassword')?.value || '';
+      const submitBtn = document.getElementById('btnRecoverySubmit');
+
+      if (newPassword.length < 6) {
+        showAuthFeedback('New password must be at least 6 characters long.', 'error');
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        showAuthFeedback('Passwords do not match. Please re-enter both fields.', 'error');
+        return;
+      }
+
+      showAuthFeedback('', 'info');
+      setButtonBusy(submitBtn, 'Updating password...', true);
+      try {
+        const { data, error } = await updateUserPassword(newPassword);
+        if (error) {
+          showAuthFeedback(mapAuthError(error), 'error');
+          return;
+        }
+        authState.recoveryActive = false;
+        if (data?.user) authState.user = data.user;
+        document.getElementById('authRecoveryForm')?.reset();
+        updateAuthUI();
+        if (isAuthenticated()) {
+          switchView('dashboard');
+          showToast('Password updated successfully!', 'NORMAL');
+        } else {
+          setAuthMode('login', true);
+          showAuthFeedback('Password updated successfully. You can now sign in with your new password.', 'success');
+        }
+      } catch (err) {
+        showAuthFeedback(mapAuthError(err), 'error');
+      } finally {
+        setButtonBusy(submitBtn, 'Update Password & Continue', false);
+      }
+    });
+
+    // Display Mode Selector & Persona Cards (UI perspective only, NOT auth)
     const roleSelector = document.getElementById('roleSelector');
     if (roleSelector) {
       roleSelector.addEventListener('change', (e) => {
         appState.config.role = e.target.value;
         renderAll();
-        showToast(`Switched to ${e.target.options[e.target.selectedIndex].text} mode`, 'NORMAL');
+        showToast(`Switched UI display mode to ${e.target.options[e.target.selectedIndex].text} (display only)`, 'NORMAL');
       });
     }
 
@@ -1854,7 +2946,7 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
     document.getElementById('btnQuickElevateAdmin')?.addEventListener('click', () => {
       appState.config.role = 'admin';
       renderAll();
-      showToast('System Administrator permissions unlocked', 'NORMAL');
+      showToast('Switched to Admin Sandbox UI display mode (prototype preview only)', 'NORMAL');
     });
 
     // Unit Toggle (Inches vs Centimeters)
@@ -2389,7 +3481,140 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
         appState.subscriptions = appState.subscriptions.filter((s) => s.id !== subId);
         renderAll();
         showToast('Removed alert watch rule', 'NORMAL');
+        return;
       }
+
+      const saveFloodBtn = e.target.closest('.js-save-flood-event');
+      if (saveFloodBtn) {
+        const idx = Number(saveFloodBtn.getAttribute('data-index'));
+        if (Number.isFinite(idx)) {
+          handleSaveFloodEvent(idx);
+        }
+        return;
+      }
+
+      const delSavedBtn = e.target.closest('.js-delete-saved-event');
+      if (delSavedBtn) {
+        const savedId = delSavedBtn.getAttribute('data-saved-id');
+        if (savedId) {
+          handleDeleteSavedEvent(savedId);
+        }
+        return;
+      }
+
+      const signInSavedBtn = e.target.closest('.js-saved-signin-cta');
+      if (signInSavedBtn) {
+        authState.pendingProtectedView = 'realdata';
+        setAuthMode('login', false);
+        showAuthFeedback('Sign in to bookmark and view your saved historical flood events.', 'info');
+        applyActiveViewDOM('auth');
+      }
+    });
+
+    document.getElementById('btnRefreshSavedEvents')?.addEventListener('click', () => {
+      loadSavedFloodEvents(true);
+    });
+
+    // Real NYC Flood Data (NYC Open Data FloodNet API) Controls
+    function syncRealFiltersFromInputs(resetPage) {
+      realFloodState.search = (document.getElementById('realDataSearchInput')?.value || '').trim();
+      realFloodState.borough = document.getElementById('realDataBoroughFilter')?.value || 'ALL';
+      realFloodState.sensorId = document.getElementById('realDataSensorFilter')?.value || 'ALL';
+      realFloodState.startDate = document.getElementById('realDataStartDate')?.value || '';
+      realFloodState.endDate = document.getElementById('realDataEndDate')?.value || '';
+      realFloodState.pageSize = Number(document.getElementById('realDataPageSize')?.value || 25);
+      if (resetPage) realFloodState.page = 1;
+    }
+
+    function resetRealFiltersAndReload() {
+      const searchEl = document.getElementById('realDataSearchInput');
+      const boroughEl = document.getElementById('realDataBoroughFilter');
+      const sensorEl = document.getElementById('realDataSensorFilter');
+      const startEl = document.getElementById('realDataStartDate');
+      const endEl = document.getElementById('realDataEndDate');
+      const sizeEl = document.getElementById('realDataPageSize');
+      if (searchEl) searchEl.value = '';
+      if (boroughEl) boroughEl.value = 'ALL';
+      if (sensorEl) sensorEl.value = 'ALL';
+      if (startEl) startEl.value = '';
+      if (endEl) endEl.value = '';
+      if (sizeEl) sizeEl.value = '25';
+      realFloodState.search = '';
+      realFloodState.borough = 'ALL';
+      realFloodState.sensorId = 'ALL';
+      realFloodState.startDate = '';
+      realFloodState.endDate = '';
+      realFloodState.pageSize = 25;
+      realFloodState.page = 1;
+      populateRealDataFilterOptions();
+      loadRealFloodData();
+    }
+
+    document.getElementById('realDataFilterForm')?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      syncRealFiltersFromInputs(true);
+      loadRealFloodData();
+    });
+
+    document.getElementById('realDataBoroughFilter')?.addEventListener('change', () => {
+      syncRealFiltersFromInputs(true);
+      populateRealDataFilterOptions();
+      loadRealFloodData();
+    });
+
+    ['realDataSensorFilter', 'realDataStartDate', 'realDataEndDate', 'realDataPageSize'].forEach((id) => {
+      document.getElementById(id)?.addEventListener('change', () => {
+        syncRealFiltersFromInputs(true);
+        loadRealFloodData();
+      });
+    });
+
+    document.getElementById('btnResetRealDataFilters')?.addEventListener('click', resetRealFiltersAndReload);
+    document.getElementById('btnEmptyResetRealData')?.addEventListener('click', resetRealFiltersAndReload);
+
+    document.getElementById('btnRefreshRealData')?.addEventListener('click', () => {
+      syncRealFiltersFromInputs(false);
+      loadRealFloodData({ refreshMetadata: true, showToastOnDone: true });
+    });
+    document.getElementById('btnRetryRealData')?.addEventListener('click', () => {
+      syncRealFiltersFromInputs(false);
+      loadRealFloodData({ refreshMetadata: !realFloodState.metadataLoaded, showToastOnDone: true });
+    });
+
+    document.getElementById('btnRealPageFirst')?.addEventListener('click', () => {
+      if (realFloodState.page > 1) {
+        realFloodState.page = 1;
+        loadRealFloodData();
+      }
+    });
+    document.getElementById('btnRealPagePrev')?.addEventListener('click', () => {
+      if (realFloodState.page > 1) {
+        realFloodState.page -= 1;
+        loadRealFloodData();
+      }
+    });
+    document.getElementById('btnRealPageNext')?.addEventListener('click', () => {
+      if (realFloodState.page < realFloodState.totalPages) {
+        realFloodState.page += 1;
+        loadRealFloodData();
+      }
+    });
+    document.getElementById('btnRealPageLast')?.addEventListener('click', () => {
+      if (realFloodState.page < realFloodState.totalPages) {
+        realFloodState.page = realFloodState.totalPages;
+        loadRealFloodData();
+      }
+    });
+    document.getElementById('btnJumpPast1000')?.addEventListener('click', () => {
+      const targetPage = Math.min(realFloodState.totalPages, Math.floor(1000 / realFloodState.pageSize) + 1);
+      realFloodState.page = targetPage;
+      loadRealFloodData({ showToastOnDone: true });
+    });
+    document.getElementById('btnRealPageGo')?.addEventListener('click', () => {
+      const val = Number(document.getElementById('realDataJumpPageInput')?.value || 1);
+      const clamped = Math.max(1, Math.min(realFloodState.totalPages, Math.floor(val)));
+      realFloodState.page = clamped;
+      loadRealFloodData();
     });
 
     window.addEventListener('resize', () => {
@@ -2398,24 +3623,145 @@ import { fetchSupabaseFloodData, getSupabaseDiagnostics } from './supabaseClient
     window.addEventListener('online', () => {
       renderTopStatusAndTicker();
       loadSupabaseData(false);
+      if (activeView === 'realdata') {
+        loadRealFloodData({ refreshMetadata: !realFloodState.metadataLoaded });
+      }
     });
     window.addEventListener('offline', () => {
       renderTopStatusAndTicker();
       renderSupabaseStatusBar();
       renderSupabasePanel();
+      if (activeView === 'realdata') {
+        renderRealFloodDataView();
+      }
     });
   }
 
   /* --------------------------------------------------------------------------
-   * 14. INITIALIZE APPLICATION ON DOM READY
+   * 14. INITIALIZE SUPABASE AUTH SESSION & APPLICATION ON DOM READY
    * -------------------------------------------------------------------------- */
+  async function initAuthentication() {
+    let urlErrorDesc = '';
+    let urlRedirectType = '';
+    try {
+      const current = new URL(window.location.href);
+      const hashParams = new URLSearchParams(current.hash.replace(/^#/, ''));
+      urlErrorDesc =
+        current.searchParams.get('error_description') ||
+        hashParams.get('error_description') ||
+        current.searchParams.get('error') ||
+        hashParams.get('error') ||
+        '';
+      urlRedirectType = current.searchParams.get('type') || hashParams.get('type') || '';
+    } catch {
+      // Ignore URL parsing issues
+    }
+
+    if (urlRedirectType === 'recovery') {
+      authState.recoveryActive = true;
+    }
+
+    authUnsubscribe = subscribeToAuthState((event, session) => {
+      authState.session = session || null;
+      authState.user = session?.user || null;
+
+      if (event === 'PASSWORD_RECOVERY') {
+        authState.recoveryActive = true;
+        updateAuthUI();
+        setAuthMode('recovery', true);
+        showAuthFeedback('Recovery link verified. Enter and confirm your new password below.', 'info');
+        applyActiveViewDOM('auth');
+        cleanAuthRedirectUrl();
+        return;
+      }
+
+      if (event === 'SIGNED_IN' && session?.user) {
+        updateAuthUI();
+        loadSupabaseData(false);
+        loadSavedFloodEvents(false);
+        cleanAuthRedirectUrl();
+
+        if (!authState.recoveryActive && activeView === 'auth') {
+          const targetView = authState.pendingProtectedView || 'dashboard';
+          authState.pendingProtectedView = null;
+          switchView(targetView);
+          showToast(`Signed in as ${getUserDisplayName(session.user)}`, 'NORMAL');
+        }
+        return;
+      }
+
+      if (event === 'SIGNED_OUT') {
+        authState.session = null;
+        authState.user = null;
+        authState.recoveryActive = false;
+        savedEventsState.status = 'unauthenticated';
+        savedEventsState.events = [];
+        savedEventsState.errorMessage = '';
+        updateAuthUI();
+        renderRealFloodDataView();
+        if (PROTECTED_VIEWS.has(activeView)) {
+          setAuthMode('login', false);
+          showAuthFeedback('Your session has ended. Please sign in to continue.', 'info');
+          applyActiveViewDOM('auth');
+        }
+      }
+    });
+
+    try {
+      const { session, error } = await getAuthSession();
+      authState.loading = false;
+      authState.session = session || null;
+      authState.user = session?.user || null;
+
+      if (urlErrorDesc) {
+        updateAuthUI();
+        setAuthMode('login', true);
+        showAuthFeedback(mapAuthError({ message: urlErrorDesc }), 'error');
+        applyActiveViewDOM('auth');
+        cleanAuthRedirectUrl();
+      } else if (authState.recoveryActive && session?.user) {
+        updateAuthUI();
+        setAuthMode('recovery', true);
+        showAuthFeedback('Recovery link verified. Enter and confirm your new password below.', 'info');
+        applyActiveViewDOM('auth');
+        cleanAuthRedirectUrl();
+      } else if (session?.user) {
+        updateAuthUI();
+        loadSavedFloodEvents(false);
+        cleanAuthRedirectUrl();
+        let savedView = null;
+        try {
+          savedView = window.sessionStorage.getItem(LAST_VIEW_KEY);
+        } catch {
+          savedView = null;
+        }
+        if (savedView && document.getElementById('view-' + savedView)) {
+          applyActiveViewDOM(savedView);
+        }
+      } else {
+        if (error) {
+          showAuthFeedback(mapAuthError(error), 'error');
+        }
+        updateAuthUI();
+        renderSavedFloodEventsPanel();
+      }
+    } catch (err) {
+      authState.loading = false;
+      updateAuthUI();
+      showAuthFeedback(mapAuthError(err), 'error');
+    }
+
+    loadSupabaseData(false);
+  }
+
   function init() {
     populateStationDropdowns();
     bindEvents();
     updateUltrasonicCalculator();
     renderAll();
     startTelemetryTicker();
-    loadSupabaseData(false);
+    initAuthentication();
+
     if (supabasePollTimerId) clearInterval(supabasePollTimerId);
     supabasePollTimerId = setInterval(() => {
       if (!simulatedOffline && navigator.onLine) {
