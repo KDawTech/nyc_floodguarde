@@ -264,11 +264,13 @@
           <div class="meta-line">
             <span id="dashSourceBadge" class="source-indicator source-unavailable">UNAVAILABLE</span>
             <span class="meta-sep" aria-hidden="true">&middot;</span>
+            <span id="dashQualityBadge" class="source-indicator quality-unavailable" title="Ultrasonic signal quality status">Quality: Unavailable</span>
+            <span class="meta-sep" aria-hidden="true">&middot;</span>
             <span id="dashSourceDetail" class="meta-text">No live Arduino or backup simulation active</span>
           </div>
           <h1 id="dashHeading" class="section-title">FloodGuard Prototype Monitoring Dashboard</h1>
           <p class="section-subtitle">
-            Ultrasonic depth calculation in centimeters, noise-filtered rate of change, drainage trend, and early-warning threshold projections.
+            Validated ultrasonic depth in centimeters, spike-filtered water-level trend, sensor quality monitoring, and conservative early-warning projections.
           </p>
         </div>
 
@@ -286,11 +288,11 @@
       <div id="simControlStrip" class="sim-strip hidden" role="region" aria-label="Backup Simulation Controls">
         <div class="sim-strip-info">
           <strong>SIMULATED DEMO BACKUP (Not Live Arduino Hardware)</strong>
-          <span>Use these pump-model scenarios to demonstrate rising-water ETA, splash filtering, and drainage recovery when hardware is disconnected.</span>
+          <span>Use these scenarios to test rising-water ETA, splash filtering, and falling-water trend detection when hardware is disconnected.</span>
         </div>
         <div class="sim-strip-actions">
-          <button type="button" id="btnSimRise" class="btn btn-sm btn-warning">Rising Flood (Inflow)</button>
-          <button type="button" id="btnSimDrain" class="btn btn-sm btn-cyan">Drainage (Falling)</button>
+          <button type="button" id="btnSimRise" class="btn btn-sm btn-warning">Simulate Rising Water</button>
+          <button type="button" id="btnSimDrain" class="btn btn-sm btn-cyan">Simulate Falling Water</button>
           <button type="button" id="btnSimSteady" class="btn btn-sm btn-outline">Hold Steady</button>
           <button type="button" id="btnSimResetDry" class="btn btn-sm btn-outline">Reset Dry (0 cm)</button>
         </div>
@@ -307,21 +309,24 @@
           </div>
         </article>
 
-        <!-- 2. Current Water Level -->
+        <!-- 2. Filtered Water Level (Mathematically Consistent with Filtered Distance) -->
         <article class="metric-card">
-          <div class="metric-label">Current Water Level</div>
+          <div class="metric-label">Filtered Water Level</div>
           <div class="metric-number-row">
             <span id="dashDepthCm" class="metric-value">--</span>
             <span class="metric-unit">cm</span>
           </div>
           <div id="dashDepthFormula" class="metric-subtext mono-text">
-            Depth = Mount Height &minus; Measured Distance
+            Filtered Depth = Mount &minus; Filtered Dist
+          </div>
+          <div id="dashRawReadingLine" class="metric-subtext mono-text raw-reading-subtext">
+            Latest raw sensor: --
           </div>
         </article>
 
-        <!-- 3. Rising / Falling / Drainage Trend -->
+        <!-- 3. Water-Level Trend -->
         <article class="metric-card">
-          <div class="metric-label">Water Trend &amp; Drainage</div>
+          <div class="metric-label">Water-Level Trend</div>
           <div id="dashTrendValue" class="metric-trend-text">Unavailable</div>
           <div id="dashTrendMeta" class="metric-subtext">
             Waiting for timestamped measurements
@@ -336,7 +341,7 @@
             <span class="metric-unit">cm/min</span>
           </div>
           <div id="dashRateMeta" class="metric-subtext">
-            Rolling median filter active to reject ripples
+            Causal median &amp; spike rejection active
           </div>
         </article>
 
@@ -353,8 +358,8 @@
               <strong id="dashEtaCritVal" class="eta-val">Not available</strong>
             </div>
           </div>
-          <div class="metric-subtext">
-            Mathematical projection only &mdash; not a guaranteed weather or flood forecast.
+          <div id="dashEtaNote" class="metric-subtext">
+            Mathematical projection only &mdash; shown only when sensor quality is Good and water rises reliably.
           </div>
         </article>
       </div>
@@ -393,12 +398,20 @@
 
           <div class="spec-list">
             <div class="spec-row">
-              <span class="spec-label">Measured Distance to Water</span>
+              <span class="spec-label">Sensor Quality</span>
+              <strong id="hwSensorQualityVal" class="mono-val">Unavailable</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Filtered Distance to Water</span>
+              <strong id="hwFilteredDistanceVal" class="mono-val">--</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Latest Raw Distance</span>
               <strong id="hwDistanceVal" class="mono-val">--</strong>
             </div>
             <div class="spec-row">
               <span class="spec-label">Sensor Mounting Height</span>
-              <strong id="hwMountHeightVal" class="mono-val">25.0 cm</strong>
+              <strong id="hwMountHeightVal" class="mono-val">25.00 cm</strong>
             </div>
             <div class="spec-row">
               <span class="spec-label">Low-Water Float Switch</span>
@@ -410,7 +423,7 @@
             </div>
             <div class="spec-row">
               <span class="spec-label">Flood &amp; Drainage Pumps</span>
-              <span class="spec-note">Manual operation only (automatic pump control not yet implemented)</span>
+              <span class="spec-note">Manual only (pump state &amp; drainage operation are not yet monitored)</span>
             </div>
             <div class="spec-row">
               <span class="spec-label">Servo Flood Barrier (Optional)</span>
@@ -676,9 +689,9 @@
             NYC FloodNet provides invaluable historical street flood observations across New York City. NYC FloodGuard builds on that inspiration by focusing on <strong>active early warning and drainage feedback</strong>:
           </p>
           <ul class="clean-list">
-            <li><strong>Rising-Water Velocity:</strong> Computes smoothed rate of change (<code>cm/min</code>) over a rolling window instead of looking only at static depth.</li>
-            <li><strong>Conservative Early-Warning ETA:</strong> Projects estimated time to Warning and Critical thresholds when water is rising reliably, and honestly shows <em>Not available</em> when water is stable, draining, or noisy.</li>
-            <li><strong>Drainage Monitoring:</strong> Explicitly detects falling water levels when the drainage pump operates so observers can verify that conditions are improving.</li>
+            <li><strong>Rising-Water Velocity:</strong> Computes statistically validated rate of change (<code>cm/min</code>) over a rolling window instead of reacting to isolated ripples.</li>
+            <li><strong>Conservative Early-Warning ETA:</strong> Projects estimated time to Warning and Critical thresholds only when sensor quality is Good and water rises reliably; otherwise displays <em>Not available</em>.</li>
+            <li><strong>Falling-Water Tracking:</strong> Detects statistically reliable <strong>Falling Water</strong> trends honestly without assuming drainage-pump operation before pump telemetry exists.</li>
             <li><strong>Side-by-Side Real-World Context:</strong> Keeps prototype measurements clearly separated from authentic historical NYC FloodNet records.</li>
           </ul>
         </article>
@@ -686,13 +699,13 @@
         <article class="surface-card">
           <h2 class="card-title" style="margin-bottom:8px;">How Flood Detection &amp; Early Warning Work</h2>
           <div class="formula-box">
-            Water Depth (cm) = Sensor Mounting Height (cm) &minus; Measured Distance to Water (cm)
+            Filtered Water Depth (cm) = Sensor Mounting Height (cm) &minus; Filtered Distance (cm)
           </div>
           <ul class="clean-list">
-            <li><strong>Step 1 &mdash; Calibrated Ultrasonic Depth:</strong> The HC-SR04 measures air distance to the water surface in centimeters. Subtracting from the dry mounting height yields water depth.</li>
-            <li><strong>Step 2 &mdash; Splash &amp; Ripple Filtering:</strong> On-board 5-ping median filtering plus a browser rolling median window suppress ripples and sudden single-frame echo spikes.</li>
-            <li><strong>Step 3 &mdash; Trend &amp; Threshold Evaluation:</strong> Linear regression computes slope (<code>cm/min</code>) and goodness-of-fit (<code>R&sup2;</code>). Status maps clearly to <strong>NORMAL</strong> (Green), <strong>WARNING</strong> (Orange), and <strong>CRITICAL</strong> (Red).</li>
-            <li><strong>Step 4 &mdash; Mathematical Projection:</strong> When rising reliably, <code>ETA = (Threshold &minus; Depth) / Rise Rate</code>. This is a mathematical projection, not a guaranteed weather forecast.</li>
+            <li><strong>Step 1 &mdash; Physical Range Validation:</strong> Distances below 2.0 cm (HC-SR04 blind zone) or beyond mounting height + dry tolerance are flagged <strong>Out of Range</strong> and never turned into 0.0 cm depth.</li>
+            <li><strong>Step 2 &mdash; Spike Rejection &amp; Causal Median:</strong> On-board 5-ping median bursts plus browser-side isolated spike rejection and causal trailing median filtering suppress single-frame echo glitches.</li>
+            <li><strong>Step 3 &mdash; Statistical Trend &amp; Quality Gating:</strong> Linear regression evaluates slope (<code>cm/min</code>), <code>R&sup2;</code>, and <code>t</code>-statistic so only consistent trends report <strong>Rising Water</strong> or <strong>Falling Water</strong>.</li>
+            <li><strong>Step 4 &mdash; Mathematical Projection:</strong> When sensor quality is <strong>Good</strong> and rising reliably, <code>ETA = (Threshold &minus; Depth) / Rise Rate</code>. This is a mathematical projection, not a guaranteed weather forecast.</li>
           </ul>
         </article>
       </div>
@@ -733,10 +746,10 @@
         <section class="surface-card">
           <h2 class="card-title" style="margin-bottom:8px;">3.3V GPIO Safety &amp; Sensor Calibration</h2>
           <div class="inline-notice notice-warn" style="margin-bottom:12px;">
-            <strong>Critical 3.3V Warning (Arduino GIGA R1 WiFi):</strong> GIGA R1 GPIO pins are <strong>3.3V only</strong> and are NOT 5V tolerant. A standard 5V HC-SR04 outputs 5V on its <code>ECHO</code> pin &mdash; always connect <code>ECHO</code> through a <strong>1 k&Omega; / 2 k&Omega; voltage divider</strong> (steps 5V down to 3.33V) or a 5V-to-3.3V logic level shifter before wiring to pin <code>D9</code>.
+            <strong>Critical 3.3V Warning (Arduino GIGA R1 WiFi):</strong> GIGA R1 GPIO pins are <strong>3.3V only</strong> and are NOT 5V tolerant. A standard 5V HC-SR04 outputs 5V on its <code>ECHO</code> pin &mdash; connect <code>ECHO</code> through <strong>two 470&nbsp;&Omega; resistors in series (940&nbsp;&Omega;) toward <code>D10</code></strong> with <strong>one 1&nbsp;k&Omega; resistor from <code>D10</code> to <code>GND</code></strong> (steps 5V safely down to ~2.58V for 3.3V GPIO).
           </div>
           <ul class="clean-list">
-            <li><strong>Wiring:</strong> <code>VCC &rarr; 5V</code>, <code>GND &rarr; GND</code>, <code>TRIG &rarr; D8</code>, <code>ECHO &rarr; 1k&Omega;/2k&Omega; divider &rarr; D9</code>, Float switches &rarr; <code>D6 / D7</code> to <code>GND</code>.</li>
+            <li><strong>Wiring:</strong> <code>VCC &rarr; 5V</code>, <code>GND &rarr; GND</code>, <code>TRIG &rarr; D9</code>, <code>ECHO &rarr; 470&Omega; + 470&Omega; &rarr; D10 &rarr; 1k&Omega; &rarr; GND</code>, Float switches &rarr; <code>D6 / D7</code> to <code>GND</code>.</li>
             <li><strong>Calibration:</strong> Empty the 3D-printed street model completely dry, measure the distance from the HC-SR04 sensor face to the street floor (in cm), and set <code>MOUNT_HEIGHT_CM</code> in both the sketch and Administrator Settings.</li>
             <li><strong>Browser Requirement:</strong> Web Serial requires desktop Google Chrome or Microsoft Edge over HTTPS or localhost.</li>
           </ul>
@@ -755,6 +768,9 @@
   "float_low": true,
   "float_high": false,
   "barrier_state": "not_installed",
+  "quality": "good",
+  "burst_spread_cm": 0.18,
+  "valid_pings": 5,
   "uptime_ms": 14200
 }</pre>
         </section>

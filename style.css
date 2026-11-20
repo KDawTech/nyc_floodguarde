@@ -799,6 +799,27 @@ code {
   color: var(--cyan-300);
 }
 
+/* Sensor Quality Indicators (Good / Unstable / Out of Range / Unavailable) */
+.quality-good {
+  background: var(--normal-100);
+  color: var(--normal-700);
+}
+
+.quality-unstable {
+  background: var(--warn-100);
+  color: var(--warn-700);
+}
+
+.quality-out-of-range {
+  background: var(--crit-100);
+  color: var(--crit-700);
+}
+
+.quality-unavailable {
+  background: var(--gray-200);
+  color: var(--gray-700);
+}
+
 .status-tag {
   font-size: 0.76rem;
   font-weight: 700;
@@ -956,9 +977,37 @@ code {
   color: var(--gray-600);
 }
 
+.status-card-out-of-range {
+  background: var(--crit-50);
+  border-color: rgba(220, 38, 38, 0.45);
+}
+.status-card-out-of-range .metric-status-text {
+  color: var(--crit-700);
+  font-size: 1.32rem;
+}
+
+.raw-reading-subtext {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--gray-200);
+  color: var(--gray-500);
+  font-size: 0.74rem;
+}
+
+.raw-reading-subtext.raw-reading-flagged {
+  color: var(--crit-700);
+  border-top-color: rgba(220, 38, 38, 0.28);
+}
+
+.raw-reading-subtext.raw-reading-spike {
+  color: var(--warn-700);
+  border-top-color: rgba(234, 88, 12, 0.28);
+}
+
 .trend-rising { color: var(--warn-700); }
-.trend-falling { color: var(--normal-700); }
-.trend-stable { color: var(--navy-900); }
+.trend-falling { color: var(--cyan-700); }
+.trend-stable { color: var(--normal-700); }
+.trend-uncertain { color: var(--warn-700); }
 .trend-unavailable { color: var(--gray-500); }
 
 .eta-pair {

@@ -39,7 +39,6 @@ import {
 } from './nycOpenData.js';
 import {
   DEFAULT_PROTOTYPE_SETTINGS,
-  computeWaterDepthCm,
   analyzeWaterTelemetry
 } from './floodAnalytics.js';
 import {
@@ -53,7 +52,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
   const PROTECTED_VIEWS = new Set(['dashboard']);
   const LAST_VIEW_KEY = 'nyc_floodguard_last_view_v2';
-  const MAX_CHART_SAMPLES = 45;
+  const MAX_RAW_PACKETS = 60;
 
   /* --------------------------------------------------------------------------
    * 1. APPLICATION STATE (STRICTLY SEPARATED DATASETS)
@@ -572,29 +571,33 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     el.className = `inline-notice ${cls}`;
   }
 
-  function pushTelemetrySample({ distanceCm, depthCm, mountHeightCm, timestampMs }) {
+  function pushTelemetrySample({
+    distanceCm = null,
+    mountHeightCm = null,
+    timestampMs = Date.now(),
+    errorCode = null,
+    firmwareQuality = null,
+    burstSpreadCm = null,
+    validPings = null
+  }) {
     const mount = Number.isFinite(mountHeightCm)
       ? mountHeightCm
       : prototypeSettingsState.values.mountHeightCm;
 
-    // Prefer exact formula: Water Depth = Sensor Mounting Height - Measured Distance
-    let computedDepth = null;
-    if (Number.isFinite(distanceCm)) {
-      computedDepth = computeWaterDepthCm(mount, distanceCm);
-    } else if (Number.isFinite(depthCm)) {
-      computedDepth = Math.max(0, Number(depthCm.toFixed(2)));
-    }
-    if (computedDepth == null) return;
-
+    // Store raw packet verbatim (including out-of-range and timeout frames)
+    // so analyzeWaterTelemetry() can flag Out of Range, reject spikes, and never fake 0 cm.
     telemetryState.samples.push({
       timestampMs: timestampMs || Date.now(),
       distanceCm: Number.isFinite(distanceCm) ? Number(distanceCm.toFixed(2)) : null,
-      depthCm: computedDepth,
-      mountHeightCm: Number(mount.toFixed(2))
+      mountHeightCm: Number(mount.toFixed(2)),
+      errorCode: errorCode || null,
+      firmwareQuality: firmwareQuality || null,
+      burstSpreadCm: Number.isFinite(burstSpreadCm) ? Number(burstSpreadCm.toFixed(2)) : null,
+      validPings: Number.isFinite(validPings) ? validPings : null
     });
 
-    if (telemetryState.samples.length > MAX_CHART_SAMPLES) {
-      telemetryState.samples = telemetryState.samples.slice(-MAX_CHART_SAMPLES);
+    if (telemetryState.samples.length > MAX_RAW_PACKETS) {
+      telemetryState.samples = telemetryState.samples.slice(-MAX_RAW_PACKETS);
     }
 
     recalculateTelemetryAndRender();
@@ -618,7 +621,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       } else if (status === 'connected') {
         // Never allow simulation backup to stay active while live hardware is connected
         stopSimulationBackup(false);
-        telemetryState.mode = 'UNAVAILABLE'; // Stay UNAVAILABLE until first valid sensor packet arrives!
+        telemetryState.mode = 'UNAVAILABLE'; // Stay UNAVAILABLE until first Arduino packet arrives
         telemetryState.samples = [];
         telemetryState.connectionText = msg;
         telemetryState.latestHardware.lastPacketMs = null;
@@ -638,7 +641,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       }
     },
     onReading(packet) {
-      // Genuine live Arduino sensor packet received over USB Serial
+      // Genuine live Arduino sensor packet received over USB Serial (including timeout / out-of-range frames)
       if (telemetryState.simTimerId) {
         stopSimulationBackup(false);
       }
@@ -650,7 +653,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         barrierState: packet.barrierState || 'not_installed',
         lastPacketMs: packet.receivedAtMs
       };
-      telemetryState.connectionText = `${packet.device} · USB Serial 115200 baud · Last reading ${new Date(packet.receivedAtMs).toLocaleTimeString()}`;
+      telemetryState.connectionText = `${packet.device} · USB Serial 115200 baud · Last packet ${new Date(packet.receivedAtMs).toLocaleTimeString()}`;
       setDashboardNotice('', 'info');
 
       // Use Admin-configured mounting height if set in Supabase, or Arduino's calibrated mount_height_cm
@@ -659,11 +662,20 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
           ? prototypeSettingsState.values.mountHeightCm
           : packet.mountHeightCm ?? prototypeSettingsState.values.mountHeightCm;
 
+      // Legacy fallback only if a packet sent water_depth_cm without distance_cm and without error
+      let distanceCm = packet.distanceCm;
+      if (distanceCm == null && !packet.errorCode && Number.isFinite(packet.reportedDepthCm)) {
+        distanceCm = mountHeightCm - packet.reportedDepthCm;
+      }
+
       pushTelemetrySample({
-        distanceCm: packet.distanceCm,
-        depthCm: packet.reportedDepthCm,
+        distanceCm,
         mountHeightCm,
-        timestampMs: packet.receivedAtMs
+        timestampMs: packet.receivedAtMs,
+        errorCode: packet.errorCode,
+        firmwareQuality: packet.firmwareQuality,
+        burstSpreadCm: packet.burstSpreadCm,
+        validPings: packet.validPings
       });
     },
     onError(errMsg) {
@@ -702,14 +714,14 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       const mount = prototypeSettingsState.values.mountHeightCm;
       const maxDepth = Math.max(5, mount - 2.5);
 
-      // Simulate realistic inflow pump, drainage pump, or steady ripples
+      // Simulate realistic rising, falling, or steady ultrasonic distance readings
       let deltaCm = 0;
       if (telemetryState.simScenario === 'RISING') {
-        deltaCm = 0.055 + (Math.random() - 0.5) * 0.04; // ~+3.3 cm/min steady rise for crisp classroom demo
+        deltaCm = 0.065 + (Math.random() - 0.5) * 0.025; // ~+3.9 cm/min steady rise for crisp classroom demo
       } else if (telemetryState.simScenario === 'FALLING') {
-        deltaCm = -0.06 + (Math.random() - 0.5) * 0.04; // ~-3.6 cm/min drainage recovery
+        deltaCm = -0.065 + (Math.random() - 0.5) * 0.025; // ~-3.9 cm/min steady falling water
       } else {
-        deltaCm = (Math.random() - 0.5) * 0.06; // Minor ripple noise around steady level
+        deltaCm = (Math.random() - 0.5) * 0.03; // Minor acoustic ripple around steady surface
       }
 
       telemetryState.simCurrentDepthCm = Math.max(
@@ -717,10 +729,10 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         Math.min(maxDepth, telemetryState.simCurrentDepthCm + deltaCm)
       );
 
-      // Occasional tiny ultrasonic surface ripple to demonstrate median splash rejection
-      const rippleNoise = Math.random() < 0.12 ? (Math.random() - 0.5) * 0.45 : (Math.random() - 0.5) * 0.08;
+      // Small realistic ultrasonic jitter (±0.04 cm)
+      const rippleNoise = (Math.random() - 0.5) * 0.08;
       const simulatedDepth = Math.max(0, telemetryState.simCurrentDepthCm + rippleNoise);
-      const simulatedDistance = Math.max(2.0, mount - simulatedDepth);
+      const simulatedDistance = Math.max(2.2, mount - simulatedDepth);
 
       telemetryState.latestHardware.floatLow = simulatedDepth >= 2.0;
       telemetryState.latestHardware.floatHigh = simulatedDepth >= prototypeSettingsState.values.critThresholdCm;
@@ -728,7 +740,6 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
       pushTelemetrySample({
         distanceCm: simulatedDistance,
-        depthCm: null,
         mountHeightCm: mount,
         timestampMs: Date.now()
       });
@@ -783,8 +794,9 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       telemetryState.latestAnalysis ||
       analyzeWaterTelemetry(telemetryState.samples, cfg, telemetryState.mode);
 
-    // 1. Source indicator & buttons
+    // 1. Source indicator, Sensor Quality badge & controls
     const sourceBadge = document.getElementById('dashSourceBadge');
+    const qualityBadge = document.getElementById('dashQualityBadge');
     const sourceDetail = document.getElementById('dashSourceDetail');
     const btnConnect = document.getElementById('btnConnectArduino');
     const btnDisconnect = document.getElementById('btnDisconnectArduino');
@@ -801,6 +813,20 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       } else {
         sourceBadge.textContent = 'UNAVAILABLE';
         sourceBadge.className = 'source-indicator source-unavailable';
+      }
+    }
+
+    if (qualityBadge) {
+      qualityBadge.textContent = `Quality: ${analysis.sensorQualityLabel}`;
+      qualityBadge.title = analysis.sensorQualityReason || '';
+      if (analysis.sensorQuality === 'GOOD') {
+        qualityBadge.className = 'source-indicator quality-good';
+      } else if (analysis.sensorQuality === 'UNSTABLE') {
+        qualityBadge.className = 'source-indicator quality-unstable';
+      } else if (analysis.sensorQuality === 'OUT_OF_RANGE') {
+        qualityBadge.className = 'source-indicator quality-out-of-range';
+      } else {
+        qualityBadge.className = 'source-indicator quality-unavailable';
       }
     }
 
@@ -821,16 +847,13 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       simStrip.classList.toggle('hidden', telemetryState.mode !== 'SIMULATED');
     }
 
-    // 2. Flood status card (NORMAL Green, WARNING Orange, CRITICAL Red, UNAVAILABLE Slate)
+    // 2. Flood status card (NORMAL Green, WARNING Orange, CRITICAL Red, OUT OF RANGE Red, UNAVAILABLE Slate)
     const statusCard = document.getElementById('cardFloodStatus');
     const statusVal = document.getElementById('dashStatusValue');
-    const warnLbl = document.getElementById('dashWarnValLabel');
-    const critLbl = document.getElementById('dashCritValLabel');
+    const statusMeta = document.getElementById('dashStatusMeta');
     const etaWarnThresh = document.getElementById('dashEtaWarnThresh');
     const etaCritThresh = document.getElementById('dashEtaCritThresh');
 
-    if (warnLbl) warnLbl.textContent = Number(cfg.warnThresholdCm).toFixed(1);
-    if (critLbl) critLbl.textContent = Number(cfg.critThresholdCm).toFixed(1);
     if (etaWarnThresh) etaWarnThresh.textContent = Number(cfg.warnThresholdCm).toFixed(1);
     if (etaCritThresh) etaCritThresh.textContent = Number(cfg.critThresholdCm).toFixed(1);
 
@@ -845,63 +868,104 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       } else if (analysis.status === 'CRITICAL') {
         statusCard.classList.add('status-card-critical');
         statusVal.textContent = 'CRITICAL';
+      } else if (analysis.status === 'OUT_OF_RANGE') {
+        statusCard.classList.add('status-card-out-of-range');
+        statusVal.textContent = 'OUT OF RANGE';
       } else {
         statusCard.classList.add('status-card-unavailable');
         statusVal.textContent = 'UNAVAILABLE';
       }
     }
 
-    // 3. Water depth (cm) & formula breakdown
-    const depthEl = document.getElementById('dashDepthCm');
-    const depthFormulaEl = document.getElementById('dashDepthFormula');
-    if (depthEl) {
-      depthEl.textContent = analysis.available ? analysis.currentDepthCm.toFixed(1) : '--';
-    }
-    if (depthFormulaEl) {
-      if (analysis.available && analysis.measuredDistanceCm != null) {
-        const inchesRef = (analysis.currentDepthCm / 2.54).toFixed(1);
-        depthFormulaEl.textContent = `Mount ${analysis.mountHeightCm.toFixed(1)} cm − Dist ${analysis.measuredDistanceCm.toFixed(1)} cm (${inchesRef} in)`;
-      } else if (analysis.available) {
-        depthFormulaEl.textContent = `Filtered depth (${(analysis.currentDepthCm / 2.54).toFixed(1)} in)`;
+    if (statusMeta) {
+      if (analysis.status === 'OUT_OF_RANGE') {
+        statusMeta.textContent =
+          analysis.sensorQualityReason || 'Ultrasonic echoes out of range — not interpreted as 0 cm';
       } else {
-        depthFormulaEl.textContent = 'Depth = Mount Height − Measured Distance';
+        statusMeta.innerHTML =
+          `Prototype thresholds: Warn &ge; <span id="dashWarnValLabel">${Number(cfg.warnThresholdCm).toFixed(1)}</span> cm &middot; ` +
+          `Crit &ge; <span id="dashCritValLabel">${Number(cfg.critThresholdCm).toFixed(1)}</span> cm`;
       }
     }
 
-    // 4. Water Trend & Drainage Monitoring
+    // 3. Filtered Water Level (cm) with exact mathematical consistency & separate raw reading line
+    const depthEl = document.getElementById('dashDepthCm');
+    const depthFormulaEl = document.getElementById('dashDepthFormula');
+    const rawLineEl = document.getElementById('dashRawReadingLine');
+
+    if (depthEl) {
+      depthEl.textContent =
+        analysis.available && analysis.filteredDepthCm != null
+          ? analysis.filteredDepthCm.toFixed(2)
+          : '--';
+    }
+
+    if (depthFormulaEl) {
+      if (analysis.available && analysis.filteredDistanceCm != null && analysis.filteredDepthCm != null) {
+        const mountStr = analysis.mountHeightCm.toFixed(2);
+        const fDistStr = analysis.filteredDistanceCm.toFixed(2);
+        const fDepthStr = analysis.filteredDepthCm.toFixed(2);
+        if (analysis.filteredDistanceCm > analysis.mountHeightCm) {
+          depthFormulaEl.textContent = `Mount ${mountStr} − Filtered ${fDistStr} = 0.00 cm (dry floor)`;
+        } else {
+          depthFormulaEl.textContent = `Mount ${mountStr} − Filtered ${fDistStr} = ${fDepthStr} cm`;
+        }
+      } else if (analysis.status === 'OUT_OF_RANGE') {
+        depthFormulaEl.textContent = 'Invalid distance — not shown as 0.00 cm';
+      } else {
+        depthFormulaEl.textContent = 'Filtered Depth = Mount − Filtered Dist';
+      }
+    }
+
+    if (rawLineEl) {
+      rawLineEl.className = 'metric-subtext mono-text raw-reading-subtext';
+      if (analysis.rawReadingStatus === 'OUT_OF_RANGE') {
+        rawLineEl.classList.add('raw-reading-flagged');
+        rawLineEl.textContent =
+          analysis.rawDistanceCm != null
+            ? `Raw: Dist ${analysis.rawDistanceCm.toFixed(2)} cm (Out of Range — rejected)`
+            : 'Raw: Ultrasonic timeout (Out of Range)';
+      } else if (analysis.rawReadingStatus === 'SPIKE_REJECTED') {
+        rawLineEl.classList.add('raw-reading-spike');
+        rawLineEl.textContent =
+          analysis.rawDistanceCm != null
+            ? `Raw: Dist ${analysis.rawDistanceCm.toFixed(2)} cm (Isolated spike rejected)`
+            : 'Raw: Isolated spike rejected';
+      } else if (analysis.rawDistanceCm != null && analysis.rawDepthCm != null) {
+        rawLineEl.textContent = `Raw: Dist ${analysis.rawDistanceCm.toFixed(2)} cm → ${analysis.rawDepthCm.toFixed(2)} cm`;
+      } else {
+        rawLineEl.textContent = 'Latest raw sensor: --';
+      }
+    }
+
+    // 4. Water-Level Trend (Statistically validated; reports Falling Water without claiming pump state)
     const trendValEl = document.getElementById('dashTrendValue');
     const trendMetaEl = document.getElementById('dashTrendMeta');
     if (trendValEl) {
       trendValEl.className = 'metric-trend-text';
-      if (!analysis.available) {
+      if (analysis.trend === 'UNAVAILABLE') {
         trendValEl.classList.add('trend-unavailable');
         trendValEl.textContent = 'Unavailable';
       } else if (analysis.trend === 'RISING') {
         trendValEl.classList.add('trend-rising');
-        trendValEl.textContent = '▲ Rising';
+        trendValEl.textContent = '▲ Rising Water';
       } else if (analysis.trend === 'FALLING') {
         trendValEl.classList.add('trend-falling');
-        trendValEl.textContent = '▼ Falling (Draining)';
-      } else {
+        trendValEl.textContent = '▼ Falling Water';
+      } else if (analysis.trend === 'STABLE') {
         trendValEl.classList.add('trend-stable');
-        trendValEl.textContent = analysis.trendLabel === 'Collecting baseline…' ? 'Collecting baseline…' : '● Stable';
+        trendValEl.textContent = '● Stable';
+      } else {
+        trendValEl.classList.add('trend-uncertain');
+        trendValEl.textContent =
+          analysis.trendLabel === 'Collecting baseline…' ? 'Collecting baseline…' : '? Uncertain';
       }
     }
     if (trendMetaEl) {
-      if (!analysis.available) {
-        trendMetaEl.textContent = 'Waiting for timestamped measurements';
-      } else if (analysis.isDraining) {
-        trendMetaEl.textContent = 'Water decreasing — drainage is improving conditions';
-      } else if (analysis.trend === 'RISING') {
-        trendMetaEl.textContent = analysis.isReliableRise
-          ? 'Consistent upward rise detected across rolling window'
-          : 'Slight rise detected — verifying consistency before projecting ETA';
-      } else {
-        trendMetaEl.textContent = 'Water surface steady within noise deadband';
-      }
+      trendMetaEl.textContent = analysis.trendDetail || 'Waiting for timestamped measurements';
     }
 
-    // 5. Rate of Change (cm/min)
+    // 5. Rate of Change (cm/min) — shown only when sensor quality is Good and baseline collected
     const rateEl = document.getElementById('dashRateValue');
     const rateMetaEl = document.getElementById('dashRateMeta');
     if (rateEl) {
@@ -913,16 +977,23 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       }
     }
     if (rateMetaEl) {
-      if (!analysis.available) {
-        rateMetaEl.textContent = 'Rolling median filter active to reject ripples';
+      if (telemetryState.mode === 'UNAVAILABLE') {
+        rateMetaEl.textContent = 'Causal median & spike rejection active';
+      } else if (analysis.sensorQuality === 'OUT_OF_RANGE') {
+        rateMetaEl.textContent = 'Rate paused — ultrasonic reading out of range';
+      } else if (analysis.sensorQuality === 'UNSTABLE') {
+        rateMetaEl.textContent = analysis.sensorQualityReason || 'Rate paused — signal unstable';
+      } else if (analysis.rateCmPerMin == null) {
+        rateMetaEl.textContent = `Collecting clean window (${Math.min(5, analysis.sampleCount)}/5 samples over 4s)`;
       } else {
-        rateMetaEl.textContent = `Window: ${Math.min(10, analysis.sampleCount)} filtered samples · Fit R² = ${analysis.rSquared.toFixed(2)}`;
+        rateMetaEl.textContent = `Window: ${Math.min(10, analysis.sampleCount)} clean · R² = ${analysis.rSquared.toFixed(2)} · t = ${analysis.tStat.toFixed(1)}`;
       }
     }
 
-    // 6. Early-Warning Threshold ETA
+    // 6. Early-Warning Threshold ETA (Strictly disabled unless Good quality + reliable rise)
     const etaWarnEl = document.getElementById('dashEtaWarnVal');
     const etaCritEl = document.getElementById('dashEtaCritVal');
+    const etaNoteEl = document.getElementById('dashEtaNote');
     if (etaWarnEl) {
       etaWarnEl.textContent = analysis.etaWarning.label;
       etaWarnEl.className =
@@ -943,8 +1014,18 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
           ? ' eta-active'
           : '');
     }
+    if (etaNoteEl) {
+      if (analysis.sensorQuality === 'OUT_OF_RANGE' || analysis.sensorQuality === 'UNSTABLE') {
+        etaNoteEl.textContent = `ETA suppressed while sensor quality is ${analysis.sensorQualityLabel}.`;
+      } else {
+        etaNoteEl.textContent =
+          'Mathematical projection only — shown only when sensor quality is Good and water rises reliably.';
+      }
+    }
 
     // 7. Hardware Details Strip
+    const hwQuality = document.getElementById('hwSensorQualityVal');
+    const hwFilteredDist = document.getElementById('hwFilteredDistanceVal');
     const hwDist = document.getElementById('hwDistanceVal');
     const hwMount = document.getElementById('hwMountHeightVal');
     const hwFloatLow = document.getElementById('hwFloatLowVal');
@@ -952,14 +1033,32 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     const hwBarrier = document.getElementById('hwBarrierStateVal');
     const hwSupabase = document.getElementById('hwSupabaseDemoStatus');
 
-    if (hwDist) {
-      hwDist.textContent =
-        analysis.available && analysis.measuredDistanceCm != null
-          ? `${analysis.measuredDistanceCm.toFixed(1)} cm`
+    if (hwQuality) {
+      hwQuality.textContent = analysis.sensorQualityLabel;
+    }
+    if (hwFilteredDist) {
+      hwFilteredDist.textContent =
+        analysis.available && analysis.filteredDistanceCm != null
+          ? `${analysis.filteredDistanceCm.toFixed(2)} cm`
           : '--';
     }
+    if (hwDist) {
+      if (analysis.rawDistanceCm != null) {
+        const flag =
+          analysis.rawReadingStatus === 'OUT_OF_RANGE'
+            ? ' (Out of Range)'
+            : analysis.rawReadingStatus === 'SPIKE_REJECTED'
+            ? ' (Spike rejected)'
+            : '';
+        hwDist.textContent = `${analysis.rawDistanceCm.toFixed(2)} cm${flag}`;
+      } else if (analysis.rawReadingStatus === 'OUT_OF_RANGE') {
+        hwDist.textContent = 'Timeout (Out of Range)';
+      } else {
+        hwDist.textContent = '--';
+      }
+    }
     if (hwMount) {
-      hwMount.textContent = `${Number(analysis.mountHeightCm || cfg.mountHeightCm).toFixed(1)} cm`;
+      hwMount.textContent = `${Number(analysis.mountHeightCm || cfg.mountHeightCm).toFixed(2)} cm`;
     }
 
     const formatFloatState = (val) => {
@@ -2020,7 +2119,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
     document.getElementById('btnSimRise')?.addEventListener('click', () => {
       telemetryState.simScenario = 'RISING';
-      showToast('Backup simulation: Inflow pump rising water.', 'WARNING');
+      showToast('Backup simulation: Water level rising.', 'WARNING');
     });
 
     document.getElementById('btnSimDrain')?.addEventListener('click', () => {
@@ -2028,7 +2127,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       if (telemetryState.simCurrentDepthCm < 2.0) {
         telemetryState.simCurrentDepthCm = 10.5;
       }
-      showToast('Backup simulation: Drainage pump lowering water.', 'NORMAL');
+      showToast('Backup simulation: Water level falling.', 'NORMAL');
     });
 
     document.getElementById('btnSimSteady')?.addEventListener('click', () => {
@@ -2041,7 +2140,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       telemetryState.simCurrentDepthCm = 0;
       telemetryState.samples = [];
       recalculateTelemetryAndRender();
-      showToast('Backup simulation reset to dry floor (0.0 cm).', 'NORMAL');
+      showToast('Backup simulation reset to dry floor (0.00 cm).', 'NORMAL');
     });
 
     document.getElementById('btnClearChartHistory')?.addEventListener('click', () => {
@@ -2049,7 +2148,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       recalculateTelemetryAndRender();
     });
 
-    // Chart hover inspection
+    // Chart hover inspection (distinguishing filtered vs raw values consistently)
     const historyCanvas = document.getElementById('floodHistoryCanvas');
     if (historyCanvas) {
       historyCanvas.addEventListener('mousemove', (e) => {
@@ -2060,8 +2159,10 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         const pt = lastChartPoints[idx];
         const readout = document.getElementById('dashChartReadout');
         if (readout && pt) {
-          const distPart = pt.distanceCm != null ? ` · Distance: ${pt.distanceCm.toFixed(1)} cm` : '';
-          readout.textContent = `${new Date(pt.timestampMs).toLocaleTimeString()} — Filtered Depth: ${pt.filteredDepthCm.toFixed(1)} cm (Raw: ${pt.depthCm.toFixed(1)} cm${distPart})`;
+          const fDistStr = pt.filteredDistanceCm != null ? pt.filteredDistanceCm.toFixed(2) : '--';
+          const rDistStr = pt.rawDistanceCm != null ? pt.rawDistanceCm.toFixed(2) : '--';
+          const rDepthStr = pt.rawDepthCm != null ? pt.rawDepthCm.toFixed(2) : '--';
+          readout.textContent = `${new Date(pt.timestampMs).toLocaleTimeString()} — Filtered: ${pt.filteredDepthCm.toFixed(2)} cm (Dist ${fDistStr} cm) · Raw: ${rDepthStr} cm (Dist ${rDistStr} cm)`;
         }
       });
     }

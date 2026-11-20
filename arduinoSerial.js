@@ -6,17 +6,11 @@
  * Uses the browser Web Serial API (Chrome / Edge / Opera on desktop) to receive
  * live newline-delimited JSON sensor readings over USB at 115200 baud.
  *
- * Expected Serial JSON line format from Arduino GIGA R1 WiFi:
- * {
- *   "device": "GIGA-R1-WIFI",
- *   "mount_height_cm": 25.0,
- *   "distance_cm": 18.4,
- *   "water_depth_cm": 6.6,
- *   "float_low": true,
- *   "float_high": false,
- *   "barrier_state": "not_installed",
- *   "uptime_ms": 14200
- * }
+ * Compatible with BOTH original firmware payloads and upgraded quality payloads:
+ *   Valid reading:
+ *     {"device":"GIGA-R1-WIFI","mount_height_cm":25.00,"distance_cm":18.40,"water_depth_cm":6.60,"float_low":true,"float_high":false,"barrier_state":"not_installed","quality":"good","burst_spread_cm":0.18,"valid_pings":5,"uptime_ms":14200}
+ *   Timeout / Out-of-range reading:
+ *     {"device":"GIGA-R1-WIFI","mount_height_cm":25.00,"distance_cm":null,"water_depth_cm":null,"error":"ultrasonic_timeout","quality":"out_of_range","uptime_ms":15200}
  * ============================================================================
  */
 
@@ -26,7 +20,8 @@ export function isWebSerialSupported() {
 
 /**
  * Safely parses a single newline-delimited JSON line from the Arduino serial stream.
- * Returns null for non-JSON boot/debug lines or malformed payloads.
+ * Preserves explicit error/out-of-range frames so the dashboard flags Out of Range
+ * instead of silently dropping them or interpreting them as 0.0 cm water depth.
  */
 export function parseArduinoSerialLine(rawLine) {
   const trimmed = String(rawLine || '').trim();
@@ -38,12 +33,19 @@ export function parseArduinoSerialLine(rawLine) {
     const obj = JSON.parse(trimmed);
     if (!obj || typeof obj !== 'object') return null;
 
+    const errorCode = obj.error ? String(obj.error) : null;
     const distanceCm = obj.distance_cm != null ? Number(obj.distance_cm) : null;
     const mountHeightCm = obj.mount_height_cm != null ? Number(obj.mount_height_cm) : null;
     const waterDepthCm = obj.water_depth_cm != null ? Number(obj.water_depth_cm) : null;
+    const burstSpreadCm = obj.burst_spread_cm != null ? Number(obj.burst_spread_cm) : null;
+    const validPings = obj.valid_pings != null ? Number(obj.valid_pings) : null;
+    const firmwareQuality = obj.quality ? String(obj.quality).toLowerCase() : null;
 
-    // Must contain at least a valid distance_cm or water_depth_cm numeric reading
-    if (!Number.isFinite(distanceCm) && !Number.isFinite(waterDepthCm)) {
+    const hasValidMeasurement = Number.isFinite(distanceCm) || Number.isFinite(waterDepthCm);
+    const hasExplicitError = Boolean(errorCode) || firmwareQuality === 'out_of_range';
+
+    // Ignore unrelated JSON objects that contain neither measurement nor sensor error
+    if (!hasValidMeasurement && !hasExplicitError) {
       return null;
     }
 
@@ -52,6 +54,10 @@ export function parseArduinoSerialLine(rawLine) {
       distanceCm: Number.isFinite(distanceCm) ? distanceCm : null,
       mountHeightCm: Number.isFinite(mountHeightCm) ? mountHeightCm : null,
       reportedDepthCm: Number.isFinite(waterDepthCm) ? waterDepthCm : null,
+      errorCode,
+      firmwareQuality,
+      burstSpreadCm: Number.isFinite(burstSpreadCm) ? burstSpreadCm : null,
+      validPings: Number.isFinite(validPings) ? validPings : null,
       floatLow: typeof obj.float_low === 'boolean' ? obj.float_low : null,
       floatHigh: typeof obj.float_high === 'boolean' ? obj.float_high : null,
       barrierState: obj.barrier_state ? String(obj.barrier_state) : 'not_installed',
@@ -103,7 +109,6 @@ export class ArduinoSerialClient {
 
       this.onStatusChange('connected', `Connected over USB Serial (${this.baudRate} baud). Waiting for sensor JSON…`);
 
-      // Start background read loop without blocking connect() resolution
       this._readLoop().catch((err) => {
         if (this.keepReading) {
           this.onError(err instanceof Error ? err.message : 'USB Serial connection interrupted.');
