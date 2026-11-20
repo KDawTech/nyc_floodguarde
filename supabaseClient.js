@@ -543,3 +543,201 @@ export async function deleteSavedFloodEvent(savedId) {
   return { status: 'ok', errorMessage: '' };
 }
 
+/* --------------------------------------------------------------------------
+ * REAL ROLE-BASED AUTHORIZATION (`user_profiles`) & ADMIN SETTINGS (`monitoring_settings`)
+ * Enforced strictly by Supabase PostgreSQL Row Level Security (RLS).
+ * Never trusts client dropdowns or browser storage for administrator privileges.
+ * -------------------------------------------------------------------------- */
+function isMissingTableOrRelation(err, tableName) {
+  if (!err) return false;
+  const code = String(err.code || '').toUpperCase();
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    code === '42P01' ||
+    code === 'PGRST205' ||
+    (msg.includes(tableName.toLowerCase()) &&
+      (msg.includes('does not exist') || msg.includes('could not find')))
+  );
+}
+
+/**
+ * Fetches the authenticated user's verified role from `public.user_profiles`.
+ * Always defaults to 'user' if unauthenticated, missing, or unmigrated.
+ */
+export async function fetchUserProfileRole() {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return {
+      status: 'unconfigured',
+      role: 'user',
+      errorMessage: initError || 'Supabase client not configured.'
+    };
+  }
+
+  const { data: sessionData } = await client.auth.getSession();
+  const user = sessionData?.session?.user;
+  if (!user) {
+    return { status: 'unauthenticated', role: 'user', errorMessage: '' };
+  }
+
+  const { data, error } = await client
+    .from('user_profiles')
+    .select('role, full_name, email')
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingTableOrRelation(error, 'user_profiles')) {
+      return {
+        status: 'migration_required',
+        role: 'user',
+        errorMessage:
+          'Table "user_profiles" has not been created yet. Run supabase_roles_and_settings.sql in Supabase SQL Editor to enable database-enforced Administrator accounts.'
+      };
+    }
+    return {
+      status: 'error',
+      role: 'user',
+      errorMessage: error.message || 'Unable to verify account role.'
+    };
+  }
+
+  const verifiedRole = data?.role === 'admin' ? 'admin' : 'user';
+  return {
+    status: 'ok',
+    role: verifiedRole,
+    profile: data || null,
+    errorMessage: ''
+  };
+}
+
+/**
+ * Reads shared prototype calibration & threshold settings from `public.monitoring_settings` (id = 1).
+ */
+export async function fetchMonitoringSettings() {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return {
+      status: 'unconfigured',
+      settings: null,
+      errorMessage: initError || 'Supabase client not configured.'
+    };
+  }
+
+  const { data: sessionData } = await client.auth.getSession();
+  if (!sessionData?.session?.user) {
+    return { status: 'unauthenticated', settings: null, errorMessage: '' };
+  }
+
+  const { data, error } = await client
+    .from('monitoring_settings')
+    .select('*')
+    .eq('id', 1)
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingTableOrRelation(error, 'monitoring_settings')) {
+      return {
+        status: 'migration_required',
+        settings: null,
+        errorMessage:
+          'Table "monitoring_settings" has not been created yet. Using default prototype calibration until supabase_roles_and_settings.sql is executed.'
+      };
+    }
+    return {
+      status: 'error',
+      settings: null,
+      errorMessage: error.message || 'Unable to load monitoring settings.'
+    };
+  }
+
+  if (!data) {
+    return { status: 'empty', settings: null, errorMessage: '' };
+  }
+
+  return {
+    status: 'ok',
+    settings: {
+      mountHeightCm: Number(data.mount_height_cm),
+      warnThresholdCm: Number(data.warn_threshold_cm),
+      critThresholdCm: Number(data.crit_threshold_cm),
+      minRiseRateCmPerMin: Number(data.min_rise_rate_cm_per_min),
+      barrierThresholdCm: Number(data.barrier_threshold_cm),
+      updatedAt: data.updated_at || null
+    },
+    errorMessage: ''
+  };
+}
+
+/**
+ * Updates prototype calibration & thresholds in `public.monitoring_settings`.
+ * Database RLS enforces that ONLY verified `admin` users can succeed.
+ */
+export async function updateMonitoringSettings(nextSettings) {
+  const { client, error: initError } = getSupabaseClient();
+  if (!client) {
+    return { status: 'error', settings: null, errorMessage: initError || 'Supabase client not configured.' };
+  }
+
+  const { data: sessionData } = await client.auth.getSession();
+  const user = sessionData?.session?.user;
+  if (!user) {
+    return { status: 'unauthenticated', settings: null, errorMessage: 'Sign in required.' };
+  }
+
+  const payload = {
+    mount_height_cm: Number(nextSettings.mountHeightCm),
+    warn_threshold_cm: Number(nextSettings.warnThresholdCm),
+    crit_threshold_cm: Number(nextSettings.critThresholdCm),
+    min_rise_rate_cm_per_min: Number(nextSettings.minRiseRateCmPerMin),
+    barrier_threshold_cm: Number(nextSettings.barrierThresholdCm),
+    updated_by: user.id,
+    updated_at: new Date().toISOString()
+  };
+
+  const { data, error } = await client
+    .from('monitoring_settings')
+    .update(payload)
+    .eq('id', 1)
+    .select('*')
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingTableOrRelation(error, 'monitoring_settings')) {
+      return {
+        status: 'migration_required',
+        settings: null,
+        errorMessage: 'Table "monitoring_settings" does not exist yet. Run supabase_roles_and_settings.sql first.'
+      };
+    }
+    return {
+      status: 'error',
+      settings: null,
+      errorMessage: error.message || 'Permission denied or invalid settings.'
+    };
+  }
+
+  // If RLS silently filtered out the UPDATE row for a non-admin user, data will be null
+  if (!data) {
+    return {
+      status: 'forbidden',
+      settings: null,
+      errorMessage: 'Administrator authorization required (enforced by Supabase Row Level Security).'
+    };
+  }
+
+  return {
+    status: 'ok',
+    settings: {
+      mountHeightCm: Number(data.mount_height_cm),
+      warnThresholdCm: Number(data.warn_threshold_cm),
+      critThresholdCm: Number(data.crit_threshold_cm),
+      minRiseRateCmPerMin: Number(data.min_rise_rate_cm_per_min),
+      barrierThresholdCm: Number(data.barrier_threshold_cm),
+      updatedAt: data.updated_at || null
+    },
+    errorMessage: ''
+  };
+}
+
+

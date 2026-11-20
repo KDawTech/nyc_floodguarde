@@ -3,1066 +3,564 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NYC FloodGuard | IoT Urban Flood Monitoring &amp; Early Warning Prototype</title>
-  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <title>NYC FloodGuard | Urban Flood Early-Warning &amp; Drainage Prototype</title>
+  <meta name="description" content="NYC FloodGuard — Educational engineering prototype for ultrasonic street-level flood detection, rising-water early-warning ETA, drainage monitoring, and NYC FloodNet historical data comparison." />
+  <meta property="og:title" content="NYC FloodGuard | Urban Flood Early-Warning &amp; Drainage Prototype" />
+  <meta property="og:description" content="Arduino GIGA R1 WiFi ultrasonic flood-monitoring prototype with rising-water early warning, drainage tracking, Supabase Auth, and official NYC FloodNet historical archive." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;family=JetBrains+Mono:wght@500;700&amp;display=swap" rel="stylesheet" />
-  <!-- External Stylesheet (Connected for Server Deployment) -->
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;family=Plus+Jakarta+Sans:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <a href="#mainContent" class="skip-link">Skip to main content</a>
 
   <!-- ====================================================================
-       TOP PROTOTYPE DISCLAIMER & LOW-LATENCY TELEMETRY BAR
-       ==================================================================== -->
-  <div class="prototype-banner" role="region" aria-label="Prototype Disclaimer and Telemetry Status">
-    <div class="prototype-banner-inner">
-      <div>
-        <span class="proto-badge">SIMULATED DEMO DATA</span>
-        <span>
-          <strong>Educational Prototype:</strong> Sensor measurements are simulated (Arduino GIGA R1 WiFi hardware not yet connected). Not an official NYC emergency service; call 911 for life-threatening emergencies.
-        </span>
-      </div>
-      <div class="telemetry-statusbar" aria-live="polite">
-        <span class="status-pill">
-          <span id="telemetryDot" class="pulse-dot"></span>
-          <span id="telemetryModeLabel">Gateway: SIMULATED_LOCAL</span>
-        </span>
-        <span class="status-pill" id="supabaseStatusPill" title="Read-only Supabase connection status (RLS enabled)">
-          <span id="supabaseStatusDot" class="pulse-dot connecting"></span>
-          <span id="supabaseStatusLabel">Supabase: Connecting...</span>
-        </span>
-        <span class="status-pill">Latency: <strong id="telemetryLatencyValue">118 ms</strong> (&lt;5s target)</span>
-        <span class="status-pill">Next Poll: <strong id="telemetryCountdownValue">5s</strong></span>
-      </div>
-    </div>
-  </div>
-
-  <!-- Network Interruption Resilience Banner -->
-  <div id="networkBanner" class="network-banner" role="alert">
-    <div class="network-banner-inner">
-      <span>
-        <strong>Temporary Internet Interruption Detected:</strong> NYC FloodGuard is operating in resilient offline mode using cached browser telemetry. Sensor updates and CRUD edits are queued locally without crashing.
-      </span>
-      <button type="button" id="btnReconnectNetwork" class="btn btn-sm btn-outline">Restore Connection</button>
-    </div>
-  </div>
-
-  <!-- Active Critical Flood Warning Ticker -->
-  <div id="emergencyTicker" class="emergency-ticker hidden" role="region" aria-live="polite" aria-label="Active Flood Alerts">
-    <div class="emergency-ticker-inner">
-      <span id="emergencyTickerText">CRITICAL FLOOD WARNING: Water levels exceed street safety thresholds.</span>
-      <button type="button" id="btnViewAlertsTicker" class="btn btn-sm btn-outline">Inspect Active Alerts</button>
-    </div>
-  </div>
-
-  <!-- ====================================================================
-       SITE HEADER & PRIMARY NAVIGATION
+       SITE HEADER — CLEAN 3-ZONE NAVIGATION (4 MAIN SECTIONS)
        ==================================================================== -->
   <header class="site-header">
     <div class="header-container">
       <a id="brandHomeLink" href="#view-home" class="brand-logo" aria-label="NYC FloodGuard Home">
-        <div class="brand-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <span class="brand-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"></path>
             <path d="M8 14c1.5 1 2.5 1 4 0s2.5-1 4 0"></path>
           </svg>
-        </div>
-        <div>
-          <span class="brand-title">NYC FloodGuard</span>
-          <span class="brand-subtitle">Ultrasonic IoT Street Water-Level Network</span>
-        </div>
+        </span>
+        <span class="brand-title">NYC FloodGuard</span>
       </a>
 
-      <button type="button" id="mobileMenuBtn" class="mobile-menu-btn" aria-expanded="false" aria-controls="primaryNav">
-        Menu
-      </button>
-
       <nav id="primaryNav" class="primary-nav" aria-label="Primary Navigation">
-        <button type="button" id="navBtnHome" class="nav-btn active" data-view="home">Home</button>
-        <button type="button" id="navBtnDashboard" class="nav-btn" data-view="dashboard" data-protected="true">Live Dashboard</button>
-        <button type="button" id="navBtnMap" class="nav-btn" data-view="map" data-protected="true">NYC Map</button>
-        <button type="button" id="navBtnCharts" class="nav-btn" data-view="charts" data-protected="true">Water-Level Charts</button>
-        <button type="button" id="navBtnAlerts" class="nav-btn" data-view="alerts" data-protected="true">
-          Flood Alerts <span id="activeAlertBadge" class="nav-badge">2</span>
-        </button>
-        <button type="button" id="navBtnManagement" class="nav-btn" data-view="management" data-protected="true">Sensor &amp; Alert Admin</button>
-        <button type="button" id="navBtnRealData" class="nav-btn" data-view="realdata">Real NYC Flood Data</button>
-        <button type="button" id="navBtnAbout" class="nav-btn" data-view="about">Project &amp; IoT Info</button>
+        <button type="button" id="navBtnHome" class="nav-btn active" data-view="home">Home / Login</button>
+        <button type="button" id="navBtnDashboard" class="nav-btn" data-view="dashboard" data-protected="true">Dashboard</button>
+        <button type="button" id="navBtnRealData" class="nav-btn" data-view="realdata">NYC FloodNet Data</button>
+        <button type="button" id="navBtnAbout" class="nav-btn" data-view="about">About Project</button>
       </nav>
 
-      <div class="header-controls">
-        <div class="role-selector-wrap" title="UI display perspective only — does not grant authentication or database admin privileges">
-          <label for="roleSelector">View:</label>
-          <select id="roleSelector" class="role-select" aria-label="Select UI Display Mode (Not Authentication)">
-            <option value="resident">NYC Resident</option>
-            <option value="operator">Monitoring Personnel</option>
-            <option value="admin">Admin Sandbox</option>
-          </select>
-        </div>
-        <button type="button" id="unitToggleBtn" class="unit-toggle-btn" title="Switch measurement units between inches and centimeters">
-          Units: IN
-        </button>
-        <button type="button" id="openServerFilesBtn" class="code-pack-btn" title="Download the 3 separate server deployment files">
-          3 Server Files
-        </button>
+      <div class="header-actions">
         <div id="authHeaderWidget" class="auth-header-widget" aria-live="polite">
           <button type="button" id="btnHeaderSignIn" class="btn btn-sm btn-cyan">Sign In</button>
           <div id="authUserSummary" class="auth-user-summary hidden">
             <div class="auth-user-details">
               <span id="authHeaderUserName" class="auth-user-name">User</span>
-              <span id="authHeaderUserEmail" class="auth-user-email">email@example.com</span>
+              <span id="authHeaderUserMeta" class="auth-user-meta">Regular User</span>
             </div>
-            <button type="button" id="btnHeaderLogout" class="btn btn-sm btn-outline auth-logout-btn">Logout</button>
+            <button type="button" id="btnHeaderLogout" class="btn btn-sm btn-header-outline">Logout</button>
           </div>
         </div>
+        <button type="button" id="mobileMenuBtn" class="mobile-menu-btn" aria-expanded="false" aria-controls="primaryNav" aria-label="Toggle navigation menu">
+          Menu
+        </button>
       </div>
     </div>
   </header>
 
+  <!-- Offline Notice (Only visible when browser actually loses internet) -->
+  <div id="networkBanner" class="network-banner hidden" role="alert">
+    <div class="network-banner-inner">
+      <span><strong>Offline:</strong> No internet connection detected. USB Serial Arduino readings continue locally; Supabase and NYC Open Data requests require connectivity.</span>
+    </div>
+  </div>
+
   <!-- ====================================================================
-       MAIN APPLICATION WORKSPACE
+       MAIN WORKSPACE (4 SIMPLIFIED SECTIONS)
        ==================================================================== -->
   <main id="mainContent" class="main-content">
 
-    <!-- Role Context & Live Simulation Control Bar -->
-    <aside class="role-context-bar" aria-label="Active User Role and Prototype Simulation Controls">
-      <div class="role-context-info">
-        <span id="roleTagLabel" class="role-tag">NYC Resident View</span>
-        <span id="roleDescriptionText">Plain-language street flood status, neighborhood water levels, and travel safety advisories.</span>
-      </div>
-      <div class="sim-toolbar">
-        <button type="button" id="btnSimRainSurge" class="btn btn-sm btn-warning" title="Simulate a heavy cloudburst storm surge across NYC sensors">
-          Simulate Heavy Rain Surge
-        </button>
-        <button type="button" id="btnSimStaleNode" class="btn btn-sm btn-outline" title="Mark a sensor reading as outdated to test stale-data detection">
-          Test Outdated Sensor
-        </button>
-        <button type="button" id="btnToggleNetworkSim" class="btn btn-sm btn-outline" title="Simulate a temporary internet disconnection">
-          Simulate Offline Drop
-        </button>
-        <button type="button" id="btnPauseTelemetry" class="btn btn-sm btn-outline" title="Pause or resume the 5-second simulated sensor polling cycle">
-          Pause 5s Stream
-        </button>
-      </div>
-    </aside>
-
     <!-- ==================================================================
-         VIEW 0: SUPABASE AUTHENTICATION PORTAL (#view-auth)
-         ================================================================== -->
-    <section id="view-auth" class="view-section" aria-labelledby="authPortalHeading">
-      <div class="auth-layout">
-        <div class="auth-info-card">
-          <span class="hero-eyebrow">Protected Monitoring Access • Supabase Auth</span>
-          <h2 id="authPortalHeading" class="hero-title" style="font-size:1.75rem;">
-            Sign In to Access the <span>NYC FloodGuard</span> Dashboard
-          </h2>
-          <p class="hero-desc" style="font-size:0.92rem;">
-            Authentication is required to access live monitoring dashboards, street water-level telemetry, NYC flood maps, historical charts, and alert management.
-          </p>
-          <ul class="auth-feature-list">
-            <li><strong>Persistent Sessions:</strong> Stay signed in securely across browser refreshes.</li>
-            <li><strong>Email Verification &amp; Recovery:</strong> Supports account confirmation links and self-service password resets.</li>
-            <li><strong>Row Level Security (RLS):</strong> Database reads stay protected via Supabase RLS policies and publishable keys.</li>
-            <li><strong>Display Mode Separation:</strong> The header View selector only adjusts prototype UI terminology and never grants authentication or admin privileges.</li>
-          </ul>
-          <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
-            <button type="button" id="btnAuthBackHome" class="btn btn-outline">Return to Public Home</button>
-          </div>
-        </div>
-
-        <div class="form-card auth-form-card">
-          <div id="authModeTabs" class="auth-tabs" role="tablist" aria-label="Authentication Modes">
-            <button type="button" id="tabAuthLogin" class="auth-tab active" role="tab" aria-selected="true" data-auth-mode="login">Sign In</button>
-            <button type="button" id="tabAuthSignUp" class="auth-tab" role="tab" aria-selected="false" data-auth-mode="signup">Sign Up</button>
-            <button type="button" id="tabAuthForgot" class="auth-tab" role="tab" aria-selected="false" data-auth-mode="forgot">Forgot Password</button>
-          </div>
-
-          <div id="authFeedbackBanner" class="auth-feedback hidden" role="alert" aria-live="polite"></div>
-
-          <!-- Login Form -->
-          <form id="authLoginForm" class="auth-form" novalidate>
-            <div class="form-group">
-              <label for="authLoginEmail" class="form-label">Email Address *</label>
-              <input type="email" id="authLoginEmail" class="form-control" autocomplete="email" placeholder="you@example.com" required />
-            </div>
-            <div class="form-group">
-              <label for="authLoginPassword" class="form-label">Password *</label>
-              <div class="password-input-wrap">
-                <input type="password" id="authLoginPassword" class="form-control" autocomplete="current-password" placeholder="Enter your password" required />
-                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authLoginPassword">Show</button>
-              </div>
-            </div>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
-              <button type="button" id="btnGoForgotFromLogin" class="auth-link-btn">Forgot password?</button>
-              <button type="button" id="btnGoSignUpFromLogin" class="auth-link-btn">Need an account? Sign Up</button>
-            </div>
-            <button type="submit" id="btnLoginSubmit" class="btn btn-cyan" style="width:100%;">Sign In to Monitoring Dashboard</button>
-          </form>
-
-          <!-- Registration (Sign Up) Form -->
-          <form id="authSignUpForm" class="auth-form hidden" novalidate>
-            <div class="form-group">
-              <label for="authSignUpName" class="form-label">Full Name *</label>
-              <input type="text" id="authSignUpName" class="form-control" autocomplete="name" placeholder="e.g., Jordan Alvarez" required />
-            </div>
-            <div class="form-group">
-              <label for="authSignUpEmail" class="form-label">Email Address *</label>
-              <input type="email" id="authSignUpEmail" class="form-control" autocomplete="email" placeholder="you@example.com" required />
-            </div>
-            <div class="form-group">
-              <label for="authSignUpPassword" class="form-label">Password * <span style="font-weight:500;color:var(--gray-500);">(min. 6 characters)</span></label>
-              <div class="password-input-wrap">
-                <input type="password" id="authSignUpPassword" class="form-control" autocomplete="new-password" placeholder="Create a strong password" required />
-                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authSignUpPassword">Show</button>
-              </div>
-            </div>
-            <div class="form-group">
-              <label for="authSignUpConfirmPassword" class="form-label">Confirm Password *</label>
-              <div class="password-input-wrap">
-                <input type="password" id="authSignUpConfirmPassword" class="form-control" autocomplete="new-password" placeholder="Re-enter your password" required />
-                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authSignUpConfirmPassword">Show</button>
-              </div>
-            </div>
-            <button type="submit" id="btnSignUpSubmit" class="btn btn-cyan" style="width:100%;margin-top:4px;">Create FloodGuard Account</button>
-          </form>
-
-          <!-- Email Verification Required Notice -->
-          <div id="authVerifyBox" class="auth-verify-box hidden">
-            <span class="status-badge badge-normal" style="margin-bottom:8px;">Check Your Inbox</span>
-            <h3 style="font-size:1.05rem;font-weight:800;color:var(--navy-900);margin-bottom:6px;">Email Verification Required</h3>
-            <p id="authVerifyMessage" style="font-size:0.86rem;color:var(--gray-700);margin-bottom:14px;">
-              We sent a confirmation link to your email address. Please verify your email before signing in.
-            </p>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button type="button" id="btnResendVerification" class="btn btn-sm btn-primary">Resend Verification Email</button>
-              <button type="button" id="btnVerifyBackToLogin" class="btn btn-sm btn-outline">Back to Sign In</button>
-            </div>
-          </div>
-
-          <!-- Forgot Password Form -->
-          <form id="authForgotForm" class="auth-form hidden" novalidate>
-            <p style="font-size:0.84rem;color:var(--gray-600);margin-bottom:12px;">
-              Enter your registered email address and we will send a password reset link powered by Supabase Auth.
-            </p>
-            <div class="form-group">
-              <label for="authForgotEmail" class="form-label">Account Email Address *</label>
-              <input type="email" id="authForgotEmail" class="form-control" autocomplete="email" placeholder="you@example.com" required />
-            </div>
-            <button type="submit" id="btnForgotSubmit" class="btn btn-cyan" style="width:100%;margin-bottom:10px;">Send Password Reset Link</button>
-            <button type="button" id="btnBackToLoginFromForgot" class="btn btn-outline" style="width:100%;">Back to Sign In</button>
-          </form>
-
-          <!-- Password Recovery (Set New Password) Form -->
-          <form id="authRecoveryForm" class="auth-form hidden" novalidate>
-            <span class="status-badge badge-warning" style="margin-bottom:8px;">Password Recovery Active</span>
-            <h3 style="font-size:1.05rem;font-weight:800;color:var(--navy-900);margin-bottom:6px;">Set a New Password</h3>
-            <p style="font-size:0.84rem;color:var(--gray-600);margin-bottom:12px;">
-              Your recovery link was verified. Choose a new password for your NYC FloodGuard account.
-            </p>
-            <div class="form-group">
-              <label for="authRecoveryNewPassword" class="form-label">New Password * <span style="font-weight:500;color:var(--gray-500);">(min. 6 characters)</span></label>
-              <div class="password-input-wrap">
-                <input type="password" id="authRecoveryNewPassword" class="form-control" autocomplete="new-password" placeholder="Enter new password" required />
-                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authRecoveryNewPassword">Show</button>
-              </div>
-            </div>
-            <div class="form-group">
-              <label for="authRecoveryConfirmPassword" class="form-label">Confirm New Password *</label>
-              <div class="password-input-wrap">
-                <input type="password" id="authRecoveryConfirmPassword" class="form-control" autocomplete="new-password" placeholder="Confirm new password" required />
-                <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authRecoveryConfirmPassword">Show</button>
-              </div>
-            </div>
-            <button type="submit" id="btnRecoverySubmit" class="btn btn-cyan" style="width:100%;">Update Password &amp; Continue</button>
-          </form>
-        </div>
-      </div>
-    </section>
-
-    <!-- ==================================================================
-         VIEW 1: HOMEPAGE (#view-home)
+         SECTION 1: HOME / LOGIN (#view-home)
          ================================================================== -->
     <section id="view-home" class="view-section active" aria-labelledby="homeHeroHeading">
-      <div class="hero-card">
-        <div>
-          <span class="hero-eyebrow">Human-Centered Urban Resilience • New York City</span>
-          <h1 id="homeHeroHeading" class="hero-title">
-            Real-Time Street Water-Level Intelligence for <span>Every NYC Neighborhood</span>
-          </h1>
-          <p class="hero-desc">
-            During cloudbursts and coastal storms, extreme rainfall overwhelms catch basins across the five boroughs. NYC FloodGuard pairs low-latency ultrasonic IoT nodes with clear neighborhood alerts so residents, monitoring teams, and administrators can spot rising water before streets become impassable.
-          </p>
-
-          <!-- Neighborhood Quick Lookup -->
-          <div class="hero-search-box">
-            <label for="homeSearchInput" class="hero-search-label">Check Water Levels in Your NYC Neighborhood or Street:</label>
-            <div class="hero-search-row">
-              <input type="text" id="homeSearchInput" class="hero-search-input" placeholder="e.g., Gowanus, Queens Blvd, FDR Drive, Staten Island..." />
-              <select id="homeBoroughSelect" class="filter-select" aria-label="Filter by NYC Borough">
-                <option value="ALL">All 5 Boroughs</option>
-                <option value="Brooklyn">Brooklyn</option>
-                <option value="Queens">Queens</option>
-                <option value="Manhattan">Manhattan</option>
-                <option value="Bronx">The Bronx</option>
-                <option value="Staten Island">Staten Island</option>
-              </select>
-              <button type="button" id="btnHomeSearch" class="btn btn-cyan">Check Street Status</button>
-            </div>
-            <div id="homeSearchFeedback" style="margin-top:8px;font-size:0.82rem;color:#67E8F9;"></div>
-          </div>
-
-          <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <button type="button" id="btnGoDashboardHero" class="btn btn-cyan">Open Live Monitoring Dashboard</button>
-            <button type="button" id="btnGoMapHero" class="btn btn-outline">Explore Interactive NYC Map</button>
-          </div>
-          <div id="homeAuthStatusNotice" style="margin-top:10px;font-size:0.8rem;color:var(--cyan-300);"></div>
-        </div>
-
-        <!-- Live Network Snapshot Panel -->
-        <div class="hero-live-panel">
-          <div class="hero-live-header">
-            <span style="font-weight:700;font-size:0.9rem;color:#67E8F9;">Citywide Telemetry Pulse (5s Cadence)</span>
-            <span class="dataset-badge dataset-badge-sim">SIMULATED DEMO DATA</span>
-          </div>
-          <div class="hero-stat-grid">
-            <div class="hero-stat-item">
-              <div id="heroStatActiveNodes" class="hero-stat-val">8 / 8</div>
-              <div class="hero-stat-lbl">Ultrasonic Nodes Reporting</div>
-            </div>
-            <div class="hero-stat-item">
-              <div id="heroStatPeakLevel" class="hero-stat-val">16.4 in</div>
-              <div class="hero-stat-lbl">Peak Street Water Depth</div>
-            </div>
-            <div class="hero-stat-item">
-              <div id="heroStatActiveAlerts" class="hero-stat-val" style="color:#F97316;">2 Active</div>
-              <div class="hero-stat-lbl">Threshold Alerts Triggered</div>
-            </div>
-            <div class="hero-stat-item">
-              <div id="heroStatLatency" class="hero-stat-val" style="color:#22D3EE;">0.12 s</div>
-              <div class="hero-stat-lbl">Receipt-to-Display Latency</div>
-            </div>
-          </div>
-          <div id="heroHighestStationBox" style="background:rgba(239,68,68,0.16);border:1px solid rgba(239,68,68,0.45);padding:10px 12px;border-radius:6px;font-size:0.82rem;">
-            Loading highest water-level station...
-          </div>
-        </div>
-      </div>
-
-      <!-- Tailored Views for the 3 Intended User Groups -->
-      <div class="section-header">
-        <div>
-          <h2 class="section-title">Designed for Three Core NYC User Groups</h2>
-          <p class="section-subtitle">Switch your active role at any time to tailor tools, terminology, and management permissions.</p>
-        </div>
-      </div>
-
-      <div class="persona-grid">
-        <article id="personaCardResident" class="persona-card active-role">
+      <div class="home-split">
+        <!-- Left: Clear Project Overview -->
+        <div class="home-intro-card">
           <div>
-            <div class="persona-icon">RES</div>
-            <h3 class="persona-title">1. New York City Residents</h3>
-            <p style="font-size:0.85rem;color:var(--gray-600);">Fast, non-technical neighborhood checks during heavy rain to protect families, basements, and vehicles.</p>
-            <ul class="persona-list">
-              <li>Color-coded safety badges (Safe, Caution Watch, Flood Warning)</li>
-              <li>Plain-language street &amp; subway underpass travel guidance</li>
-              <li>Custom neighborhood alert watchlists saved in your browser</li>
-            </ul>
-          </div>
-          <button type="button" id="btnActivateResident" class="btn btn-primary">Use Resident View</button>
-        </article>
+            <p class="eyebrow-text">Educational Engineering Prototype &middot; New York City</p>
+            <h1 id="homeHeroHeading" class="hero-title">
+              Active Street Flood <span>Early Warning</span> &amp; Drainage Monitoring
+            </h1>
+            <p class="hero-desc">
+              NYC FloodGuard upgrades passive flood reporting into an active early-warning prototype. Paired with an Arduino GIGA R1 WiFi, HC-SR04 ultrasonic sensor, float switches, and a 3D-printed NYC street model, it tracks water depth in centimeters, measures how fast water is rising or draining, and estimates time until configurable danger thresholds.
+            </p>
 
-        <article id="personaCardOperator" class="persona-card">
-          <div>
-            <div class="persona-icon">OPS</div>
-            <h3 class="persona-title">2. Monitoring Personnel</h3>
-            <p style="font-size:0.85rem;color:var(--gray-600);">Operational situational awareness across catch basins, low-lying intersections, and coastal corridors.</p>
-            <ul class="persona-list">
-              <li>5-second low-latency telemetry stream &amp; rate-of-rise tracking</li>
-              <li>Outdated/stale sensor identification &amp; ultrasonic echo diagnostics</li>
-              <li>Historical trend comparison charts, alert acknowledgment &amp; CSV export</li>
-            </ul>
+            <div class="feature-summary-list">
+              <div class="feature-summary-item">
+                <h3>Real-Time Ultrasonic Depth &amp; USB Serial</h3>
+                <p>Connect directly to the Arduino GIGA R1 WiFi over USB Serial (Web Serial API), with a clearly separated simulation mode for backup demonstrations.</p>
+              </div>
+              <div class="feature-summary-item">
+                <h3>Rising-Water ETA &amp; Drainage Tracking</h3>
+                <p>Filters surface ripples over a rolling window, detects rising vs. falling water during pump drainage, and shows conservative threshold ETAs only when water rises reliably.</p>
+              </div>
+              <div class="feature-summary-item">
+                <h3>Historical NYC FloodNet Comparison</h3>
+                <p>Explore 3,600+ official historical flood records from NYC Open Data and bookmark key events to your Supabase account.</p>
+              </div>
+            </div>
           </div>
-          <button type="button" id="btnActivateOperator" class="btn btn-primary">Use Monitoring Personnel View</button>
-        </article>
 
-        <article id="personaCardAdmin" class="persona-card">
-          <div>
-            <div class="persona-icon">ADM</div>
-            <h3 class="persona-title">3. System Administrators</h3>
-            <p style="font-size:0.85rem;color:var(--gray-600);">Full lifecycle provisioning for Arduino GIGA R1 WiFi sensor nodes and threshold governance.</p>
-            <ul class="persona-list">
-              <li>Create, Read, Update, and Delete (CRUD) monitoring locations</li>
-              <li>Configure per-site Warning &amp; Critical water-level thresholds</li>
-              <li>Hardware test bench to simulate ultrasonic readings &amp; network state</li>
-            </ul>
+          <div class="prototype-disclaimer-box">
+            <strong>Educational Prototype Disclaimer:</strong> This system is an original student engineering prototype for tabletop demonstration and is <strong>not</strong> an official NYC emergency warning service.
           </div>
-          <button type="button" id="btnActivateAdmin" class="btn btn-primary">Use Administrator View</button>
-        </article>
-      </div>
+        </div>
 
-      <!-- Priority Watchlist Preview -->
-      <div class="section-header">
-        <div>
-          <h2 class="section-title">Priority NYC Flood-Prone Corridors (Live Snapshot)</h2>
-          <p class="section-subtitle">Click any neighborhood card to inspect its sensor history or locate it on the NYC map.</p>
+        <!-- Right: Supabase Account & Authentication Card -->
+        <div class="surface-card auth-card" id="homeAuthCard">
+          <!-- Signed-In Account Summary (shown when authenticated) -->
+          <div id="homeSignedInBox" class="hidden">
+            <div class="account-header">
+              <div>
+                <p class="muted-kicker">Authenticated Session &middot; Supabase Auth</p>
+                <h2 id="homeAccountName" class="card-title" style="margin-top:4px;">Signed In</h2>
+                <p id="homeAccountEmail" class="mono-subtext"></p>
+              </div>
+              <span id="homeAccountRoleBadge" class="status-tag tag-normal">Regular User</span>
+            </div>
+
+            <div class="account-meta-box">
+              <div class="account-meta-row">
+                <span>Access Level</span>
+                <strong id="homeAccountAccessDesc">View live/simulated dashboard &amp; save historical flood events</strong>
+              </div>
+              <div class="account-meta-row">
+                <span>Session Persistence</span>
+                <strong>Active across browser refreshes</strong>
+              </div>
+            </div>
+
+            <div id="homeRoleMigrationHint" class="inline-notice notice-info hidden" style="margin-bottom:14px;"></div>
+
+            <div class="btn-row">
+              <button type="button" id="btnHomeOpenDashboard" class="btn btn-cyan">Open Monitoring Dashboard</button>
+              <button type="button" id="btnHomeOpenRealData" class="btn btn-outline">Browse NYC FloodNet Data</button>
+              <button type="button" id="btnHomeLogout" class="btn btn-outline">Logout</button>
+            </div>
+          </div>
+
+          <!-- Auth Forms (shown when signed out or resetting password) -->
+          <div id="homeAuthFormsWrap">
+            <div style="margin-bottom:14px;">
+              <p class="muted-kicker">Account Access &middot; Supabase Auth</p>
+              <h2 class="card-title" style="margin-top:2px;">Sign In to NYC FloodGuard</h2>
+              <p class="card-subtitle">Sign in to access the FloodGuard Dashboard and save personal NYC FloodNet bookmarks.</p>
+            </div>
+
+            <div id="authModeTabs" class="segmented-tabs" role="tablist" aria-label="Authentication Modes">
+              <button type="button" id="tabAuthLogin" class="seg-tab active" role="tab" aria-selected="true" data-auth-mode="login">Sign In</button>
+              <button type="button" id="tabAuthSignUp" class="seg-tab" role="tab" aria-selected="false" data-auth-mode="signup">Create Account</button>
+              <button type="button" id="tabAuthForgot" class="seg-tab" role="tab" aria-selected="false" data-auth-mode="forgot">Reset Password</button>
+            </div>
+
+            <div id="authFeedbackBanner" class="inline-notice hidden" role="alert" aria-live="polite"></div>
+
+            <!-- Sign In Form -->
+            <form id="authLoginForm" class="auth-form" novalidate>
+              <div class="form-group">
+                <label for="authLoginEmail" class="form-label">Email Address</label>
+                <input type="email" id="authLoginEmail" class="form-control" autocomplete="email" placeholder="you@example.com" required />
+              </div>
+              <div class="form-group">
+                <label for="authLoginPassword" class="form-label">Password</label>
+                <div class="password-input-wrap">
+                  <input type="password" id="authLoginPassword" class="form-control" autocomplete="current-password" placeholder="Enter your password" required />
+                  <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authLoginPassword">Show</button>
+                </div>
+              </div>
+              <div class="form-aux-row">
+                <button type="button" id="btnGoForgotFromLogin" class="text-link-btn">Forgot password?</button>
+                <button type="button" id="btnGoSignUpFromLogin" class="text-link-btn">Need an account?</button>
+              </div>
+              <button type="submit" id="btnLoginSubmit" class="btn btn-cyan btn-full">Sign In to Dashboard</button>
+            </form>
+
+            <!-- Sign Up Form -->
+            <form id="authSignUpForm" class="auth-form hidden" novalidate>
+              <div class="form-group">
+                <label for="authSignUpName" class="form-label">Full Name</label>
+                <input type="text" id="authSignUpName" class="form-control" autocomplete="name" placeholder="e.g., Jordan Alvarez" required />
+              </div>
+              <div class="form-group">
+                <label for="authSignUpEmail" class="form-label">Email Address</label>
+                <input type="email" id="authSignUpEmail" class="form-control" autocomplete="email" placeholder="you@example.com" required />
+              </div>
+              <div class="form-group">
+                <label for="authSignUpPassword" class="form-label">Password <span class="muted-inline">(min. 6 characters)</span></label>
+                <div class="password-input-wrap">
+                  <input type="password" id="authSignUpPassword" class="form-control" autocomplete="new-password" placeholder="Create a password" required />
+                  <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authSignUpPassword">Show</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="authSignUpConfirmPassword" class="form-label">Confirm Password</label>
+                <div class="password-input-wrap">
+                  <input type="password" id="authSignUpConfirmPassword" class="form-control" autocomplete="new-password" placeholder="Re-enter your password" required />
+                  <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authSignUpConfirmPassword">Show</button>
+                </div>
+              </div>
+              <p class="form-footnote">Public registrations create Regular User accounts. Administrator roles are assigned strictly in the Supabase database.</p>
+              <button type="submit" id="btnSignUpSubmit" class="btn btn-cyan btn-full">Create Account</button>
+            </form>
+
+            <!-- Email Verification Required Notice -->
+            <div id="authVerifyBox" class="verify-box hidden">
+              <h3 class="card-title" style="font-size:1rem;margin-bottom:6px;">Email Verification Required</h3>
+              <p id="authVerifyMessage" class="card-subtitle" style="margin-bottom:14px;">
+                We sent a confirmation link to your email address. Please verify your email before signing in.
+              </p>
+              <div class="btn-row">
+                <button type="button" id="btnResendVerification" class="btn btn-sm btn-primary">Resend Email</button>
+                <button type="button" id="btnVerifyBackToLogin" class="btn btn-sm btn-outline">Back to Sign In</button>
+              </div>
+            </div>
+
+            <!-- Forgot Password Form -->
+            <form id="authForgotForm" class="auth-form hidden" novalidate>
+              <p class="card-subtitle" style="margin-bottom:12px;">
+                Enter your registered email address and Supabase Auth will send a password reset link.
+              </p>
+              <div class="form-group">
+                <label for="authForgotEmail" class="form-label">Account Email Address</label>
+                <input type="email" id="authForgotEmail" class="form-control" autocomplete="email" placeholder="you@example.com" required />
+              </div>
+              <button type="submit" id="btnForgotSubmit" class="btn btn-cyan btn-full" style="margin-bottom:8px;">Send Reset Link</button>
+              <button type="button" id="btnBackToLoginFromForgot" class="btn btn-outline btn-full">Back to Sign In</button>
+            </form>
+
+            <!-- Password Recovery Form -->
+            <form id="authRecoveryForm" class="auth-form hidden" novalidate>
+              <p class="muted-kicker" style="color:var(--warn-600);">Password Recovery Active</p>
+              <h3 class="card-title" style="font-size:1.02rem;margin:4px 0 6px;">Set a New Password</h3>
+              <p class="card-subtitle" style="margin-bottom:12px;">
+                Your recovery link was verified. Choose a new password for your NYC FloodGuard account.
+              </p>
+              <div class="form-group">
+                <label for="authRecoveryNewPassword" class="form-label">New Password <span class="muted-inline">(min. 6 characters)</span></label>
+                <div class="password-input-wrap">
+                  <input type="password" id="authRecoveryNewPassword" class="form-control" autocomplete="new-password" placeholder="Enter new password" required />
+                  <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authRecoveryNewPassword">Show</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="authRecoveryConfirmPassword" class="form-label">Confirm New Password</label>
+                <div class="password-input-wrap">
+                  <input type="password" id="authRecoveryConfirmPassword" class="form-control" autocomplete="new-password" placeholder="Confirm new password" required />
+                  <button type="button" class="btn btn-sm btn-outline js-toggle-password" data-target="authRecoveryConfirmPassword">Show</button>
+                </div>
+              </div>
+              <button type="submit" id="btnRecoverySubmit" class="btn btn-cyan btn-full">Update Password</button>
+            </form>
+          </div>
         </div>
       </div>
-      <div id="homeWatchlistGrid" class="stations-grid"></div>
     </section>
 
     <!-- ==================================================================
-         VIEW 2: MONITORING DASHBOARD (#view-dashboard)
+         SECTION 2: FLOODGUARD DASHBOARD (#view-dashboard) — MOST IMPORTANT
          ================================================================== -->
     <section id="view-dashboard" class="view-section" aria-labelledby="dashHeading">
-      <div class="section-header">
+      <!-- Top Source Mode & Connection Bar -->
+      <div class="section-header dash-top-header">
         <div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
-            <span class="dataset-badge dataset-badge-sim">SIMULATED DEMO DATA • 5-Second Local Stream</span>
-            <span class="badge-db">Cloud Demo Panel Below (Supabase RLS)</span>
+          <div class="meta-line">
+            <span id="dashSourceBadge" class="source-indicator source-unavailable">UNAVAILABLE</span>
+            <span class="meta-sep" aria-hidden="true">&middot;</span>
+            <span id="dashSourceDetail" class="meta-text">No live Arduino or backup simulation active</span>
           </div>
-          <h2 id="dashHeading" class="section-title">Real-Time NYC Water-Level Monitoring Dashboard</h2>
-          <p class="section-subtitle">Low-latency simulated ultrasonic measurements updating every 5 seconds. Outdated readings (&gt;15s) are automatically flagged and kept separate from Real NYC Flood Data.</p>
+          <h1 id="dashHeading" class="section-title">FloodGuard Prototype Monitoring Dashboard</h1>
+          <p class="section-subtitle">
+            Ultrasonic depth calculation in centimeters, noise-filtered rate of change, drainage trend, and early-warning threshold projections.
+          </p>
+        </div>
+
+        <div class="connection-controls">
+          <button type="button" id="btnConnectArduino" class="btn btn-cyan">Connect Arduino (USB)</button>
+          <button type="button" id="btnDisconnectArduino" class="btn btn-outline hidden">Disconnect Arduino</button>
+          <button type="button" id="btnToggleSimBackup" class="btn btn-outline">Start Simulation Backup</button>
         </div>
       </div>
 
-      <!-- 4 KPI Cards -->
-      <div class="kpi-grid">
-        <div class="kpi-card kpi-cyan">
-          <div class="kpi-label">Active Ultrasonic Sensors</div>
-          <div id="kpiOnlineSensors" class="kpi-value">8 / 8</div>
-          <div id="kpiOnlineMeta" class="kpi-meta">Arduino GIGA R1 WiFi telemetry active</div>
+      <!-- Browser Web Serial Support / Connection Feedback Notice -->
+      <div id="dashConnectionNotice" class="inline-notice notice-info hidden" role="status" aria-live="polite"></div>
+
+      <!-- Backup Simulation Controls (Visible ONLY when Simulation Backup is active) -->
+      <div id="simControlStrip" class="sim-strip hidden" role="region" aria-label="Backup Simulation Controls">
+        <div class="sim-strip-info">
+          <strong>SIMULATED DEMO BACKUP (Not Live Arduino Hardware)</strong>
+          <span>Use these pump-model scenarios to demonstrate rising-water ETA, splash filtering, and drainage recovery when hardware is disconnected.</span>
         </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Citywide Peak Water Depth</div>
-          <div id="kpiPeakWater" class="kpi-value">16.4 in</div>
-          <div id="kpiPeakStation" class="kpi-meta">Gowanus Canal &amp; 9th St (Brooklyn)</div>
-        </div>
-        <div class="kpi-card kpi-crit">
-          <div class="kpi-label">Active Flood Warnings / Watches</div>
-          <div id="kpiActiveAlerts" class="kpi-value">2</div>
-          <div id="kpiAlertsMeta" class="kpi-meta">1 Critical Red • 1 Advisory Orange</div>
-        </div>
-        <div class="kpi-card kpi-warn">
-          <div class="kpi-label">Outdated / Stale Sensors</div>
-          <div id="kpiStaleCount" class="kpi-value">0</div>
-          <div id="kpiLatencyMeta" class="kpi-meta">Freshness threshold: 15 seconds</div>
+        <div class="sim-strip-actions">
+          <button type="button" id="btnSimRise" class="btn btn-sm btn-warning">Rising Flood (Inflow)</button>
+          <button type="button" id="btnSimDrain" class="btn btn-sm btn-cyan">Drainage (Falling)</button>
+          <button type="button" id="btnSimSteady" class="btn btn-sm btn-outline">Hold Steady</button>
+          <button type="button" id="btnSimResetDry" class="btn btn-sm btn-outline">Reset Dry (0 cm)</button>
         </div>
       </div>
 
-      <!-- Search & Filter Bar -->
-      <div class="filter-bar">
-        <div class="filter-group">
-          <input type="text" id="dashSearchInput" class="filter-input" placeholder="Search station, street, or node ID..." aria-label="Search monitoring stations" />
-          <select id="dashBoroughFilter" class="filter-select" aria-label="Filter by Borough">
-            <option value="ALL">All Boroughs</option>
-            <option value="Manhattan">Manhattan</option>
-            <option value="Brooklyn">Brooklyn</option>
-            <option value="Queens">Queens</option>
-            <option value="Bronx">The Bronx</option>
-            <option value="Staten Island">Staten Island</option>
-          </select>
-          <select id="dashStatusFilter" class="filter-select" aria-label="Filter by Flood Status">
-            <option value="ALL">All Status Levels</option>
-            <option value="CRITICAL">Critical Flood Warning (Red)</option>
-            <option value="WARNING">Elevated Flood Watch (Orange)</option>
-            <option value="NORMAL">Normal / Safe (Cyan)</option>
-            <option value="STALE">Outdated / Stale Reading</option>
-          </select>
-          <select id="dashSortSelect" class="filter-select" aria-label="Sort stations">
-            <option value="severity">Sort: Highest Flood Risk First</option>
-            <option value="depth">Sort: Water Depth (High to Low)</option>
-            <option value="name">Sort: Station Name (A–Z)</option>
-          </select>
-          <button type="button" id="btnResetDashFilters" class="btn btn-sm btn-outline">Reset Filters</button>
-        </div>
-        <div class="filter-group">
-          <button type="button" id="btnExportTelemetryCsv" class="btn btn-sm btn-primary">Export Live Snapshot (CSV)</button>
-        </div>
-      </div>
+      <!-- Primary Telemetry Readouts Grid -->
+      <div class="telemetry-grid" aria-live="polite">
+        <!-- 1. Flood Status Level -->
+        <article id="cardFloodStatus" class="metric-card status-card-unavailable">
+          <div class="metric-label">Flood Status Level</div>
+          <div id="dashStatusValue" class="metric-status-text">UNAVAILABLE</div>
+          <div id="dashStatusMeta" class="metric-subtext">
+            Prototype thresholds: Warn &ge; <span id="dashWarnValLabel">6.0</span> cm &middot; Crit &ge; <span id="dashCritValLabel">12.0</span> cm
+          </div>
+        </article>
 
-      <!-- Dedicated Live Supabase Database Feed Panel (Read-Only, Separate from Local Simulation) -->
-      <section id="supabaseLivePanel" class="form-card supabase-panel" aria-labelledby="supabasePanelHeading">
-        <div class="supabase-panel-header">
-          <div>
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
-              <span class="badge-db">Supabase Live Database • Read-Only (RLS)</span>
-              <span id="supabasePanelStatusBadge" class="status-badge badge-stale">Connecting...</span>
+        <!-- 2. Current Water Level -->
+        <article class="metric-card">
+          <div class="metric-label">Current Water Level</div>
+          <div class="metric-number-row">
+            <span id="dashDepthCm" class="metric-value">--</span>
+            <span class="metric-unit">cm</span>
+          </div>
+          <div id="dashDepthFormula" class="metric-subtext mono-text">
+            Depth = Mount Height &minus; Measured Distance
+          </div>
+        </article>
+
+        <!-- 3. Rising / Falling / Drainage Trend -->
+        <article class="metric-card">
+          <div class="metric-label">Water Trend &amp; Drainage</div>
+          <div id="dashTrendValue" class="metric-trend-text">Unavailable</div>
+          <div id="dashTrendMeta" class="metric-subtext">
+            Waiting for timestamped measurements
+          </div>
+        </article>
+
+        <!-- 4. Rate of Water-Level Change -->
+        <article class="metric-card">
+          <div class="metric-label">Rate of Change</div>
+          <div class="metric-number-row">
+            <span id="dashRateValue" class="metric-value">--</span>
+            <span class="metric-unit">cm/min</span>
+          </div>
+          <div id="dashRateMeta" class="metric-subtext">
+            Rolling median filter active to reject ripples
+          </div>
+        </article>
+
+        <!-- 5. Early-Warning Threshold ETA -->
+        <article class="metric-card metric-card-eta">
+          <div class="metric-label">Estimated Time to Threshold</div>
+          <div class="eta-pair">
+            <div class="eta-row">
+              <span class="eta-key">Warning (<span id="dashEtaWarnThresh">6.0</span> cm)</span>
+              <strong id="dashEtaWarnVal" class="eta-val">Not available</strong>
             </div>
-            <h3 id="supabasePanelHeading" style="font-size:1.05rem;font-weight:800;color:var(--navy-900);">
-              Persisted Cloud Sensors &amp; Water Readings
-            </h3>
-            <p style="font-size:0.8rem;color:var(--gray-600);">
-              Live read-only feed from Supabase tables <code>sensors</code> and <code>water_readings</code> (kept strictly separate from local browser simulation).
+            <div class="eta-row">
+              <span class="eta-key">Critical (<span id="dashEtaCritThresh">12.0</span> cm)</span>
+              <strong id="dashEtaCritVal" class="eta-val">Not available</strong>
+            </div>
+          </div>
+          <div class="metric-subtext">
+            Mathematical projection only &mdash; not a guaranteed weather or flood forecast.
+          </div>
+        </article>
+      </div>
+
+      <!-- Simple Water-Level History Chart -->
+      <section class="surface-card chart-section" aria-labelledby="dashChartHeading">
+        <div class="card-header-row">
+          <div>
+            <h2 id="dashChartHeading" class="card-title">Water-Level History (cm)</h2>
+            <p id="dashChartReadout" class="card-subtitle">
+              Filtered ultrasonic water depth plotted against configurable prototype Warning and Critical thresholds.
             </p>
           </div>
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <span id="supabaseLastSyncText" style="font-size:0.76rem;color:var(--gray-500);font-family:var(--font-mono);">Syncing...</span>
-            <button type="button" id="btnRefreshSupabase" class="btn btn-sm btn-cyan">Refresh Supabase Data</button>
+          <div class="chart-legend-inline">
+            <span class="legend-key"><span class="legend-swatch swatch-depth"></span>Water Depth</span>
+            <span class="legend-key"><span class="legend-swatch swatch-warn"></span>Warning</span>
+            <span class="legend-key"><span class="legend-swatch swatch-crit"></span>Critical</span>
+            <button type="button" id="btnClearChartHistory" class="btn btn-sm btn-outline">Clear Chart</button>
           </div>
         </div>
-        <div id="supabasePanelBody" aria-live="polite">
-          <p style="font-size:0.85rem;color:var(--gray-500);">Loading sensors and water_readings from Supabase...</p>
+        <div class="chart-canvas-wrap">
+          <canvas id="floodHistoryCanvas" aria-label="Water level history chart in centimeters"></canvas>
+          <div id="dashChartEmptyOverlay" class="chart-empty-overlay">
+            <p><strong>No active readings to plot.</strong></p>
+            <p>Click <strong>Connect Arduino (USB)</strong> for live hardware readings or <strong>Start Simulation Backup</strong> for a prototype walkthrough.</p>
+          </div>
         </div>
       </section>
 
-      <!-- Dynamic Station Cards Grid -->
-      <div id="dashboardStationsGrid" class="stations-grid" aria-live="polite"></div>
-    </section>
+      <!-- Hardware Diagnostics & Prototype Configuration Row -->
+      <div class="dash-secondary-grid">
+        <!-- Hardware Signals & Honest Feature Boundaries -->
+        <section class="surface-card" aria-labelledby="hardwareSignalsHeading">
+          <h2 id="hardwareSignalsHeading" class="card-title" style="margin-bottom:4px;">Prototype Hardware &amp; Status</h2>
+          <p class="card-subtitle" style="margin-bottom:14px;">Live sensor inputs and honest boundary between implemented vs. planned hardware control.</p>
 
-    <!-- ==================================================================
-         VIEW 3: INTERACTIVE NYC MAP (#view-map)
-         ================================================================== -->
-    <section id="view-map" class="view-section" aria-labelledby="mapHeading">
-      <div class="section-header">
-        <div>
-          <span class="dataset-badge dataset-badge-sim" style="margin-bottom:4px;">SIMULATED DEMO DATA • 5-Second Local Stream</span>
-          <h2 id="mapHeading" class="section-title">Interactive Five-Borough NYC Flood Sensor Map</h2>
-          <p class="section-subtitle">Click any pulsing sensor pin to inspect real-time simulated water depth, ultrasonic hardware diagnostics, and local street advisories.</p>
-        </div>
-      </div>
-
-      <div class="map-layout">
-        <div class="map-canvas-card">
-          <div class="map-toolbar">
-            <div class="filter-group">
-              <label for="mapBoroughFilter" style="font-size:0.78rem;font-weight:700;">Borough Focus:</label>
-              <select id="mapBoroughFilter" class="filter-select" style="padding:4px 8px;font-size:0.78rem;">
-                <option value="ALL">All NYC (5 Boroughs)</option>
-                <option value="Manhattan">Manhattan</option>
-                <option value="Brooklyn">Brooklyn</option>
-                <option value="Queens">Queens</option>
-                <option value="Bronx">The Bronx</option>
-                <option value="Staten Island">Staten Island</option>
-              </select>
-              <label style="font-size:0.78rem;display:inline-flex;align-items:center;gap:4px;cursor:pointer;">
-                <input type="checkbox" id="chkFloodZones" checked /> Coastal &amp; Stormwater Zones
-              </label>
-              <label style="font-size:0.78rem;display:inline-flex;align-items:center;gap:4px;cursor:pointer;">
-                <input type="checkbox" id="chkSensorLabels" checked /> Station Labels
-              </label>
+          <div class="spec-list">
+            <div class="spec-row">
+              <span class="spec-label">Measured Distance to Water</span>
+              <strong id="hwDistanceVal" class="mono-val">--</strong>
             </div>
-            <div class="filter-group">
-              <button type="button" id="btnMapAddStationMode" class="btn btn-sm btn-cyan">Click Map to Add Sensor</button>
-              <button type="button" id="btnResetMapView" class="btn btn-sm btn-outline">Reset View</button>
+            <div class="spec-row">
+              <span class="spec-label">Sensor Mounting Height</span>
+              <strong id="hwMountHeightVal" class="mono-val">25.0 cm</strong>
             </div>
-          </div>
-
-          <div class="map-viewport">
-            <!-- Custom Interactive SVG Map of New York City's Five Boroughs & Waterways -->
-            <svg id="nycSvgMap" class="nyc-svg-map" viewBox="0 0 800 540" role="img" aria-label="Interactive Map of New York City Flood Monitoring Stations">
-              <defs>
-                <pattern id="waterGrid" width="32" height="32" patternUnits="userSpaceOnUse">
-                  <path d="M 32 0 L 0 0 0 32" fill="none" stroke="rgba(6, 182, 212, 0.07)" stroke-width="1" />
-                </pattern>
-              </defs>
-
-              <!-- Harbor & Waterway Grid Background -->
-              <rect width="800" height="540" fill="url(#waterGrid)" />
-
-              <!-- Major Waterway Labels -->
-              <text x="235" y="185" fill="rgba(103,232,249,0.35)" font-size="11" font-weight="700" transform="rotate(-58 235,185)">HUDSON RIVER</text>
-              <text x="372" y="255" fill="rgba(103,232,249,0.35)" font-size="10" font-weight="700" transform="rotate(-48 372,255)">EAST RIVER</text>
-              <text x="240" y="385" fill="rgba(103,232,249,0.4)" font-size="12" font-weight="700">UPPER NEW YORK BAY</text>
-              <text x="545" y="455" fill="rgba(103,232,249,0.4)" font-size="12" font-weight="700">JAMAICA BAY</text>
-
-              <!-- 5 Borough Polygons -->
-              <!-- The Bronx -->
-              <path class="borough-path" data-borough="Bronx" d="M 385,35 L 515,30 L 555,85 L 535,155 L 445,170 L 385,145 L 365,85 Z" />
-              <text x="435" y="102" fill="rgba(255,255,255,0.45)" font-size="13" font-weight="800" pointer-events="none">THE BRONX</text>
-
-              <!-- Manhattan -->
-              <path class="borough-path" data-borough="Manhattan" d="M 355,88 L 382,148 L 352,245 L 312,320 L 285,315 L 302,225 L 335,130 Z" />
-              <text x="296" y="215" fill="rgba(255,255,255,0.5)" font-size="12" font-weight="800" pointer-events="none">MANHATTAN</text>
-
-              <!-- Queens -->
-              <path class="borough-path" data-borough="Queens" d="M 412,185 L 615,165 L 735,235 L 720,415 L 615,435 L 555,390 L 470,355 L 395,295 L 372,240 Z" />
-              <text x="535" y="280" fill="rgba(255,255,255,0.45)" font-size="15" font-weight="800" pointer-events="none">QUEENS</text>
-
-              <!-- Brooklyn -->
-              <path class="borough-path" data-borough="Brooklyn" d="M 342,315 L 415,290 L 495,355 L 525,445 L 430,505 L 325,495 L 295,425 L 312,355 Z" />
-              <text x="372" y="425" fill="rgba(255,255,255,0.45)" font-size="15" font-weight="800" pointer-events="none">BROOKLYN</text>
-
-              <!-- Staten Island -->
-              <path class="borough-path" data-borough="Staten Island" d="M 115,355 L 225,350 L 245,420 L 175,515 L 85,500 L 75,425 Z" />
-              <text x="115" y="440" fill="rgba(255,255,255,0.45)" font-size="12" font-weight="800" pointer-events="none">STATEN ISLAND</text>
-
-              <!-- Stormwater & Coastal Floodplain Overlay Group -->
-              <g id="svgFloodZonesGroup">
-                <ellipse class="flood-zone-overlay" cx="350" cy="368" rx="42" ry="26" />
-                <ellipse class="flood-zone-overlay" cx="505" cy="255" rx="58" ry="32" />
-                <ellipse class="flood-zone-overlay" cx="322" cy="292" rx="34" ry="22" />
-                <ellipse class="flood-zone-overlay" cx="595" cy="415" rx="64" ry="28" />
-                <ellipse class="flood-zone-overlay" cx="205" cy="410" rx="40" ry="25" />
-              </g>
-
-              <!-- Dynamic Sensor Markers Rendered by script.js -->
-              <g id="svgStationsGroup"></g>
-            </svg>
-
-            <div class="map-legend">
-              <div class="legend-item"><span class="legend-dot" style="background:#06B6D4;"></span> Normal (&lt; Warn)</div>
-              <div class="legend-item"><span class="legend-dot" style="background:#F97316;"></span> Elevated Watch (Orange)</div>
-              <div class="legend-item"><span class="legend-dot" style="background:#EF4444;"></span> Critical Flood Warning (Red)</div>
-              <div class="legend-item"><span class="legend-dot" style="background:#94A3B8;border:1px dashed #FFF;"></span> Outdated Reading (&gt;15s)</div>
+            <div class="spec-row">
+              <span class="spec-label">Low-Water Float Switch</span>
+              <strong id="hwFloatLowVal" class="mono-val">Not connected</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">High-Water Float Switch</span>
+              <strong id="hwFloatHighVal" class="mono-val">Not connected</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Flood &amp; Drainage Pumps</span>
+              <span class="spec-note">Manual operation only (automatic pump control not yet implemented)</span>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Servo Flood Barrier (Optional)</span>
+              <strong id="hwBarrierStateVal" class="mono-val">Not installed (Planned)</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Arduino Cloud Sync (Wi-Fi &rarr; Supabase)</span>
+              <span class="spec-note">Unfinished / Planned (currently local USB Serial)</span>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Existing Supabase Demo Tables</span>
+              <span id="hwSupabaseDemoStatus" class="mono-val">Checking&hellip;</span>
             </div>
           </div>
-        </div>
+        </section>
 
-        <!-- Station Map Inspector Panel -->
-        <aside class="map-inspector-card" aria-live="polite">
-          <div id="mapInspectorContent">
-            <p style="color:var(--gray-500);font-size:0.88rem;">Select a sensor node on the NYC map to inspect real-time water depth, ultrasonic sensor health, and neighborhood flood guidance.</p>
-          </div>
-        </aside>
-      </div>
-    </section>
-
-    <!-- ==================================================================
-         VIEW 4: WATER-LEVEL CHARTS & HISTORICAL ANALYTICS (#view-charts)
-         ================================================================== -->
-    <section id="view-charts" class="view-section" aria-labelledby="chartsHeading">
-      <div class="section-header">
-        <div>
-          <span class="dataset-badge dataset-badge-sim" style="margin-bottom:4px;">SIMULATED DEMO DATA • Browser localStorage</span>
-          <h2 id="chartsHeading" class="section-title">Historical Water-Level Trends &amp; Flood Threshold Analytics</h2>
-          <p class="section-subtitle">Analyze simulated sensor measurements against configured Warning and Critical thresholds across time windows.</p>
-        </div>
-      </div>
-
-      <!-- Chart Controls -->
-      <div class="filter-bar">
-        <div class="filter-group">
-          <label for="chartStationSelect" style="font-size:0.8rem;font-weight:700;">Primary Station:</label>
-          <select id="chartStationSelect" class="filter-select"></select>
-
-          <label for="chartCompareSelect" style="font-size:0.8rem;font-weight:700;">Compare With:</label>
-          <select id="chartCompareSelect" class="filter-select"></select>
-
-          <label for="chartWindowSelect" style="font-size:0.8rem;font-weight:700;">Time Horizon:</label>
-          <select id="chartWindowSelect" class="filter-select">
-            <option value="live">Live Telemetry Window (Last 12 Readings)</option>
-            <option value="24h">Last 24 Hours (Hourly Synthesis)</option>
-            <option value="storm">Historic Benchmark: Sept 29 NYC Flash Flood</option>
-          </select>
-        </div>
-        <div class="filter-group">
-          <button type="button" id="btnInjectStormSpikeChart" class="btn btn-sm btn-warning">Simulate Rain Spike on Selected Station</button>
-          <button type="button" id="btnRefreshCharts" class="btn btn-sm btn-outline">Redraw Charts</button>
-        </div>
-      </div>
-
-      <div class="charts-grid">
-        <!-- Time-Series Line Chart -->
-        <div class="chart-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <!-- Monitoring Threshold & Calibration Configuration (Supabase RLS Admin Enforced) -->
+        <section class="surface-card" aria-labelledby="settingsConfigHeading">
+          <div class="card-header-row" style="margin-bottom:8px;">
             <div>
-              <h3 style="font-size:1rem;font-weight:800;color:var(--navy-900);">Water-Level Time Series vs. Warning &amp; Critical Thresholds</h3>
-              <p id="chartHoverReadout" style="font-size:0.78rem;color:var(--gray-600);">Hover or tap over the chart to inspect exact timestamped ultrasonic depth measurements.</p>
+              <h2 id="settingsConfigHeading" class="card-title">Prototype Thresholds &amp; Calibration</h2>
+              <p class="card-subtitle">Calibrated for the physical tabletop prototype (not official NYC safety limits).</p>
             </div>
-          </div>
-          <div class="chart-canvas-wrap">
-            <canvas id="timeSeriesCanvas" aria-label="Time series line chart of water levels"></canvas>
-          </div>
-        </div>
-
-        <!-- Multi-Station Threshold Comparison Bar Chart -->
-        <div class="chart-card">
-          <div>
-            <h3 style="font-size:1rem;font-weight:800;color:var(--navy-900);">Citywide Station Depth vs. Critical Threshold (%)</h3>
-            <p style="font-size:0.78rem;color:var(--gray-600);">Current water depth across all NYC monitoring locations relative to their critical flood limits.</p>
-          </div>
-          <div class="chart-canvas-wrap">
-            <canvas id="boroughBarCanvas" aria-label="Bar chart comparing water levels across NYC monitoring stations"></canvas>
-          </div>
-        </div>
-      </div>
-
-      <!-- Historical Measurements Log Table (Persisted in localStorage) -->
-      <div class="table-card">
-        <div style="padding:14px 18px;border-bottom:1px solid var(--gray-200);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-          <div>
-            <h3 style="font-size:1rem;font-weight:800;color:var(--navy-900);">Persisted Historical Measurement Log (Browser localStorage)</h3>
-            <p style="font-size:0.78rem;color:var(--gray-600);">Stores recent readings locally in your browser so historical measurements survive page reloads during prototype testing.</p>
-          </div>
-          <div style="display:flex;gap:8px;">
-            <button type="button" id="btnDownloadHistoryCsv" class="btn btn-sm btn-primary">Download Log (CSV)</button>
-            <button type="button" id="btnClearHistoryLog" class="btn btn-sm btn-outline">Reset Log</button>
-          </div>
-        </div>
-        <div class="table-responsive">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Timestamp</th>
-                <th>Station &amp; Borough</th>
-                <th>Arduino Node ID</th>
-                <th class="num-col">Ultrasonic Echo Dist</th>
-                <th class="num-col">Computed Water Depth</th>
-                <th class="num-col">Rate of Change</th>
-                <th>Flood Status</th>
-              </tr>
-            </thead>
-            <tbody id="historyTableBody"></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <!-- ==================================================================
-         VIEW 5: FLOOD-ALERT SECTION (#view-alerts)
-         ================================================================== -->
-    <section id="view-alerts" class="view-section" aria-labelledby="alertsHeading">
-      <div class="section-header">
-        <div>
-          <h2 id="alertsHeading" class="section-title">Flood Alerts &amp; Community Threshold Notifications</h2>
-          <p class="section-subtitle">Automated alerts triggered when ultrasonic water-level measurements cross Warning (Orange) or Critical (Red) thresholds.</p>
-        </div>
-      </div>
-
-      <div class="alerts-layout">
-        <!-- Left Column: Active & Historical Alert Feed -->
-        <div>
-          <div class="filter-bar">
-            <div class="filter-group">
-              <select id="alertSeverityFilter" class="filter-select" aria-label="Filter alerts by severity">
-                <option value="ALL">All Alert Severities</option>
-                <option value="CRITICAL">Critical Flood Warning (Red)</option>
-                <option value="WARNING">Elevated Flood Watch (Orange)</option>
-              </select>
-              <select id="alertAckFilter" class="filter-select" aria-label="Filter alerts by state">
-                <option value="ALL">Active &amp; Acknowledged</option>
-                <option value="UNACK">Unacknowledged Only</option>
-                <option value="ACK">Acknowledged / Resolved</option>
-              </select>
-            </div>
-            <div class="filter-group">
-              <button type="button" id="btnTriggerTestAlert" class="btn btn-sm btn-warning">Trigger Test Flood Alert</button>
-              <button type="button" id="btnAcknowledgeAllAlerts" class="btn btn-sm btn-outline">Acknowledge All</button>
-            </div>
+            <span id="settingsRoleTag" class="status-tag tag-neutral">Read-Only</span>
           </div>
 
-          <div id="alertsFeedList" aria-live="polite"></div>
-        </div>
+          <div id="settingsStatusNotice" class="inline-notice notice-info hidden" style="margin-bottom:12px;"></div>
 
-        <!-- Right Column: Resident Local Alert Subscription & Safety Checklist -->
-        <div>
-          <div class="form-card" style="margin-bottom:16px;">
-            <h3 style="font-size:1.02rem;font-weight:800;color:var(--navy-900);margin-bottom:6px;">Subscribe to Neighborhood Flood Threshold Alerts</h3>
-            <p style="font-size:0.8rem;color:var(--gray-600);margin-bottom:14px;">
-              Configure custom neighborhood watch rules (saved in browser <code>localStorage</code> for this prototype; ready for SMS/Push backend integration).
-            </p>
-            <form id="subResidentForm">
+          <form id="adminSettingsForm" novalidate>
+            <div class="form-row-2">
               <div class="form-group">
-                <label for="subNameInput" class="form-label">Resident / Organization Name</label>
-                <input type="text" id="subNameInput" class="form-control" placeholder="e.g., Maria R. (Basement Apt)" required />
+                <label for="cfgMountHeightCm" class="form-label">Sensor Mounting Height (cm)</label>
+                <input type="number" id="cfgMountHeightCm" class="form-control mono-input" min="6" max="400" step="0.5" value="25.0" required />
               </div>
               <div class="form-group">
-                <label for="subNeighborhoodSelect" class="form-label">Monitoring Station to Watch</label>
-                <select id="subNeighborhoodSelect" class="form-control"></select>
+                <label for="cfgMinRiseRate" class="form-label">Min Reliable Rise (cm/min)</label>
+                <input type="number" id="cfgMinRiseRate" class="form-control mono-input" min="0.05" max="10" step="0.05" value="0.25" required />
               </div>
-              <div class="form-row-2">
-                <div class="form-group">
-                  <label for="subThresholdSelect" class="form-label">Notify Me At</label>
-                  <select id="subThresholdSelect" class="form-control">
-                    <option value="WARNING">Warning Threshold (Orange)</option>
-                    <option value="CRITICAL">Critical Threshold (Red)</option>
-                    <option value="CUSTOM_6">Early Advisory (6.0 inches)</option>
-                  </select>
-                </div>
-                <div class="form-group">
-                  <label for="subChannelSelect" class="form-label">Prototype Channel</label>
-                  <select id="subChannelSelect" class="form-control">
-                    <option value="Browser Toast + Audio">Browser Banner + Chime</option>
-                    <option value="Simulated SMS">Simulated SMS Text</option>
-                    <option value="Simulated Email">Simulated Email</option>
-                  </select>
-                </div>
-              </div>
-              <button type="submit" class="btn btn-cyan" style="width:100%;">Save Alert Watch Rule</button>
-            </form>
-
-            <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--gray-200);">
-              <h4 style="font-size:0.8rem;font-weight:700;color:var(--navy-900);margin-bottom:8px;">Your Saved Watch Rules:</h4>
-              <div id="subscriptionsList" style="font-size:0.8rem;color:var(--gray-700);"></div>
-            </div>
-          </div>
-
-          <div class="form-card" style="background:var(--navy-900);color:var(--white);">
-            <h3 style="font-size:0.96rem;font-weight:800;color:var(--cyan-300);margin-bottom:8px;">NYC Flash Flood Action Protocol</h3>
-            <ul style="font-size:0.82rem;color:var(--gray-200);padding-left:18px;line-height:1.6;">
-              <li><strong>Orange Watch (6–12 in):</strong> Clear curb catch basins if safe; move vehicles from low-lying underpasses; prepare basement flood barriers.</li>
-              <li><strong>Red Critical Warning (&gt;12 in):</strong> Never drive or walk through flooded streets (6 inches of fast-moving water can knock down an adult; 12 inches can float a car).</li>
-              <li><strong>Basement Apartments:</strong> Evacuate to higher ground immediately when a Critical Red threshold is reached in your corridor.</li>
-            </ul>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ==================================================================
-         VIEW 6: SENSOR & ALERT MANAGEMENT CRUD (#view-management)
-         ================================================================== -->
-    <section id="view-management" class="view-section" aria-labelledby="mgmtHeading">
-      <div class="section-header">
-        <div>
-          <h2 id="mgmtHeading" class="section-title">Sensor Locations &amp; Alert Threshold Management (CRUD)</h2>
-          <p class="section-subtitle">Create, read, update, and delete NYC monitoring stations, configure Warning/Critical thresholds, and test ultrasonic sensor hardware inputs.</p>
-        </div>
-      </div>
-
-      <!-- Display Mode Notice for Local Sandbox -->
-      <div id="adminRoleNotice" class="role-context-bar" style="border-left-color:var(--warn-500);background:var(--warn-50);">
-        <div class="role-context-info">
-          <span class="status-badge badge-warning">Display Mode Notice</span>
-          <span>This selector only adjusts the local prototype UI perspective (<strong>not</strong> authentication or Supabase database privileges). Switch to <strong>Admin Sandbox</strong> to preview local simulation CRUD controls.</span>
-        </div>
-        <button type="button" id="btnQuickElevateAdmin" class="btn btn-sm btn-primary">Preview Admin Sandbox</button>
-      </div>
-
-      <!-- Interactive Hardware Override & Sensor Test Bench -->
-      <div class="form-card" style="margin-bottom:18px;background:linear-gradient(90deg, #0A192F 0%, #112240 100%);color:var(--white);">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px;">
-          <div>
-            <span class="proto-badge">Hardware Simulation Test Bench</span>
-            <h3 style="font-size:1.05rem;font-weight:800;margin-top:4px;">Manual Ultrasonic Water-Level Override &amp; Threshold Tester</h3>
-            <p style="font-size:0.8rem;color:var(--gray-300);">Manually set a station's water level to immediately verify how flood alerts, dashboard gauges, and map pins respond.</p>
-          </div>
-        </div>
-        <div style="display:grid;grid-template-columns:1.2fr 1.5fr auto auto;gap:12px;align-items:end;">
-          <div>
-            <label for="overrideStationSelect" style="display:block;font-size:0.76rem;color:var(--cyan-300);margin-bottom:4px;">Target Monitoring Station</label>
-            <select id="overrideStationSelect" class="form-control"></select>
-          </div>
-          <div>
-            <label for="overrideDepthSlider" style="display:block;font-size:0.76rem;color:var(--cyan-300);margin-bottom:4px;">
-              Simulated Water Depth: <strong id="overrideDepthLabel" style="color:#FFF;">8.0 in (20.3 cm)</strong>
-            </label>
-            <input type="range" id="overrideDepthSlider" min="0" max="30" step="0.5" value="8" style="width:100%;accent-color:var(--cyan-400);" />
-          </div>
-          <button type="button" id="btnApplyOverride" class="btn btn-cyan">Apply Sensor Reading</button>
-          <button type="button" id="btnForceStaleSelected" class="btn btn-warning">Mark Reading Outdated (&gt;15s)</button>
-        </div>
-      </div>
-
-      <div class="crud-layout">
-        <!-- Left: Monitoring Stations CRUD Table -->
-        <div>
-          <div class="table-card" style="margin-bottom:18px;">
-            <div style="padding:14px 18px;border-bottom:1px solid var(--gray-200);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-              <div>
-                <h3 style="font-size:1rem;font-weight:800;color:var(--navy-900);">Configured NYC Ultrasonic Monitoring Locations</h3>
-                <p style="font-size:0.78rem;color:var(--gray-600);">Click Edit to modify thresholds or hardware parameters, or Delete to remove a node.</p>
-              </div>
-              <button type="button" id="btnNewStationReset" class="btn btn-sm btn-cyan">+ Add New Monitoring Location</button>
-            </div>
-            <div class="table-responsive">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Station &amp; Cross-Street</th>
-                    <th>Borough</th>
-                    <th>Arduino Node</th>
-                    <th class="num-col">Current Depth</th>
-                    <th class="num-col">Warn / Crit</th>
-                    <th>Status</th>
-                    <th>CRUD Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="crudStationsTableBody"></tbody>
-              </table>
-            </div>
-          </div>
-
-          <!-- Global Telemetry & Storage Persistence Panel -->
-          <div class="form-card">
-            <h3 style="font-size:0.98rem;font-weight:800;color:var(--navy-900);margin-bottom:6px;">Global Telemetry &amp; LocalStorage Persistence Settings</h3>
-            <p style="font-size:0.8rem;color:var(--gray-600);margin-bottom:12px;">
-              <strong>Persistence Architecture Note:</strong> This front-end prototype uses browser <code>localStorage</code> so your custom stations, alert thresholds, and historical readings survive page refreshes on your device. Because <code>localStorage</code> is client-side only, it does not provide shared multi-user server persistence until connected to the backend database API.
-            </p>
-            <div class="form-row-2" style="margin-bottom:12px;">
-              <div class="form-group">
-                <label for="globalStaleSecInput" class="form-label">Outdated Reading Timeout (Seconds)</label>
-                <input type="number" id="globalStaleSecInput" class="form-control" min="5" max="120" value="15" />
-              </div>
-              <div class="form-group">
-                <label for="globalPollSecInput" class="form-label">Target Polling Interval (Seconds, &le;5s Target)</label>
-                <input type="number" id="globalPollSecInput" class="form-control" min="2" max="30" value="5" />
-              </div>
-            </div>
-            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-              <span id="storageStatusText" style="font-size:0.78rem;color:var(--gray-600);font-family:var(--font-mono);">localStorage active</span>
-              <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <button type="button" id="btnSaveGlobalConfig" class="btn btn-sm btn-primary">Save Timing Rules</button>
-                <button type="button" id="btnExportConfigJson" class="btn btn-sm btn-outline">Export Database Seed (JSON)</button>
-                <button type="button" id="btnResetFactoryDefaults" class="btn btn-sm btn-danger">Reset Prototype to Factory Defaults</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Right: Create / Update Monitoring Location Form -->
-        <aside class="form-card">
-          <h3 id="crudFormTitle" style="font-size:1.05rem;font-weight:800;color:var(--navy-900);margin-bottom:4px;">Create New Monitoring Location</h3>
-          <p style="font-size:0.78rem;color:var(--gray-600);margin-bottom:14px;">Configure ultrasonic mounting height and flood alert thresholds.</p>
-
-          <form id="stationCrudForm">
-            <input type="hidden" id="crudStationId" value="" />
-
-            <div class="form-group">
-              <label for="crudNameInput" class="form-label">Neighborhood / Station Name *</label>
-              <input type="text" id="crudNameInput" class="form-control" placeholder="e.g., Gowanus Canal &amp; 9th St" required />
             </div>
 
             <div class="form-row-2">
               <div class="form-group">
-                <label for="crudBoroughSelect" class="form-label">NYC Borough *</label>
-                <select id="crudBoroughSelect" class="form-control" required>
-                  <option value="Brooklyn">Brooklyn</option>
-                  <option value="Queens">Queens</option>
-                  <option value="Manhattan">Manhattan</option>
-                  <option value="Bronx">The Bronx</option>
-                  <option value="Staten Island">Staten Island</option>
-                </select>
+                <label for="cfgWarnThresholdCm" class="form-label" style="color:var(--warn-600);">Warning Threshold (cm)</label>
+                <input type="number" id="cfgWarnThresholdCm" class="form-control mono-input" min="0.5" max="200" step="0.5" value="6.0" required />
               </div>
               <div class="form-group">
-                <label for="crudNodeIdInput" class="form-label">Arduino GIGA Node ID *</label>
-                <input type="text" id="crudNodeIdInput" class="form-control" placeholder="GIGA-BK-09" required />
+                <label for="cfgCritThresholdCm" class="form-label" style="color:var(--crit-600);">Critical Threshold (cm)</label>
+                <input type="number" id="cfgCritThresholdCm" class="form-control mono-input" min="1.0" max="250" step="0.5" value="12.0" required />
               </div>
             </div>
 
             <div class="form-group">
-              <label for="crudStreetInput" class="form-label">Cross-Street / Culvert Location *</label>
-              <input type="text" id="crudStreetInput" class="form-control" placeholder="e.g., 9th St &amp; 2nd Ave Underpass" required />
+              <label for="cfgBarrierThresholdCm" class="form-label">Optional Servo Barrier Trigger (cm) <span class="muted-inline">(future hardware)</span></label>
+              <input type="number" id="cfgBarrierThresholdCm" class="form-control mono-input" min="1.0" max="250" step="0.5" value="10.0" required />
             </div>
 
-            <div class="form-row-2">
-              <div class="form-group">
-                <label for="crudMountHeightInput" class="form-label">Sensor Mount Height (cm)</label>
-                <input type="number" id="crudMountHeightInput" class="form-control" min="100" max="500" step="1" value="250" required />
-              </div>
-              <div class="form-group">
-                <label for="crudCurrentDepthInput" class="form-label">Initial Water Depth (in)</label>
-                <input type="number" id="crudCurrentDepthInput" class="form-control" min="0" max="48" step="0.1" value="3.5" required />
-              </div>
+            <div id="adminSaveControls" class="btn-row hidden">
+              <button type="submit" id="btnSaveAdminSettings" class="btn btn-primary">Save Settings to Supabase</button>
+              <button type="button" id="btnResetDefaultSettings" class="btn btn-outline">Restore Defaults</button>
             </div>
-
-            <div class="form-row-2">
-              <div class="form-group">
-                <label for="crudWarnInput" class="form-label" style="color:var(--warn-600);">Warning Threshold (in) *</label>
-                <input type="number" id="crudWarnInput" class="form-control" min="1" max="36" step="0.5" value="8.0" required />
-              </div>
-              <div class="form-group">
-                <label for="crudCritInput" class="form-label" style="color:var(--crit-600);">Critical Threshold (in) *</label>
-                <input type="number" id="crudCritInput" class="form-control" min="2" max="48" step="0.5" value="14.0" required />
-              </div>
-            </div>
-
-            <div class="form-row-2">
-              <div class="form-group">
-                <label for="crudMapXInput" class="form-label">NYC Map X (50–750)</label>
-                <input type="number" id="crudMapXInput" class="form-control" min="50" max="750" value="375" required />
-              </div>
-              <div class="form-group">
-                <label for="crudMapYInput" class="form-label">NYC Map Y (40–510)</label>
-                <input type="number" id="crudMapYInput" class="form-control" min="40" max="510" value="395" required />
-              </div>
-            </div>
-
-            <div style="display:flex;gap:8px;margin-top:14px;">
-              <button type="submit" id="btnSaveStation" class="btn btn-cyan" style="flex:1;">Save Monitoring Station</button>
-              <button type="button" id="btnCancelEditStation" class="btn btn-outline">Clear</button>
-            </div>
+            <p id="regularUserSettingsNote" class="form-footnote" style="margin-top:8px;">
+              Only database-verified Administrators can save changes (enforced by Supabase Row Level Security).
+            </p>
           </form>
-        </aside>
+        </section>
       </div>
     </section>
 
     <!-- ==================================================================
-         VIEW 6B: REAL NYC FLOOD DATA — NYC OPEN DATA / FLOODNET (#view-realdata)
+         SECTION 3: NYC FLOODNET HISTORICAL DATA (#view-realdata)
          ================================================================== -->
     <section id="view-realdata" class="view-section" aria-labelledby="realDataHeading">
       <div class="section-header">
         <div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
-            <span class="dataset-badge dataset-badge-real">REAL HISTORICAL DATA • NYC Open Data (FloodNet)</span>
-            <span class="dataset-badge dataset-badge-historical">HISTORICAL ARCHIVE (NOT LIVE)</span>
-            <span class="borough-chip">Joined via sensor_id • Public SODA API</span>
+          <div class="meta-line">
+            <span class="source-indicator source-historical">HISTORICAL ARCHIVE (NOT LIVE)</span>
+            <span class="meta-sep" aria-hidden="true">&middot;</span>
+            <span class="meta-text">Official NYC Open Data (FloodNet) &middot; Kept separate from FloodGuard prototype readings</span>
           </div>
-          <h2 id="realDataHeading" class="section-title">Official NYC FloodNet Historical Flood Events</h2>
+          <h1 id="realDataHeading" class="section-title">NYC FloodNet Historical Flood Events</h1>
           <p class="section-subtitle">
-            Historical flood archive retrieved from NYC Open Data (<code>aq7i-eu5q</code>) and joined with deployed FloodNet sensor locations (<code>kb2e-tjy3</code>). This is <strong>historical recorded data (not a live feed)</strong> and is kept separate from <strong>SIMULATED DEMO DATA</strong>.
+            Authentic past street flood events retrieved via <code>fetch()</code> from NYC Open Data (<code>aq7i-eu5q</code>) and joined with sensor locations (<code>kb2e-tjy3</code>).
           </p>
         </div>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-          <span id="realDataSyncMeta" style="font-size:0.78rem;color:var(--gray-500);font-family:var(--font-mono);">Ready to load NYC Open Data</span>
+        <div class="connection-controls">
+          <span id="realDataSyncMeta" class="mono-subtext">Ready</span>
           <button type="button" id="btnRefreshRealData" class="btn btn-cyan">Refresh Data</button>
         </div>
       </div>
 
-      <!-- Data Isolation, Historical Label & API Most Recent Update Date Notice -->
-      <div class="realdata-source-banner">
+      <div class="archive-info-bar">
         <div>
-          <strong>Historical Archive Verification (Not Live):</strong> Displaying actual past street flood events measured by NYC FloodNet sensors. Only events you explicitly bookmark are saved to Supabase.
+          <strong>Historical Comparison Dataset (Not Live):</strong> Search real past NYC flood events by sensor name, street, borough, or ZIP code. Only events you explicitly save are stored in your Supabase account.
         </div>
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-family:var(--font-mono);font-size:0.76rem;color:var(--navy-900);">
-          <span id="realDataApiUpdatedMeta">API Dataset Updated: Loading...</span>
-          <span>•</span>
-          <span id="realDataLatestEventMeta">Latest Event: Loading...</span>
-        </div>
-      </div>
-
-      <!-- KPI Summary Strip -->
-      <div class="kpi-grid">
-        <div class="kpi-card kpi-cyan">
-          <div class="kpi-label">Matching Historical Events</div>
-          <div id="realDataKpiTotal" class="kpi-value">—</div>
-          <div id="realDataKpiTotalMeta" class="kpi-meta">Filtered historical FloodNet records</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Deployed FloodNet Sensors</div>
-          <div id="realDataKpiSensors" class="kpi-value">—</div>
-          <div id="realDataKpiMeta" class="kpi-meta">Joined metadata via <code>sensor_id</code></div>
-        </div>
-        <div class="kpi-card kpi-warn">
-          <div class="kpi-label">Peak Depth (Current Page)</div>
-          <div id="realDataKpiPeakDepth" class="kpi-value">—</div>
-          <div id="realDataKpiPeakSensor" class="kpi-meta">Exact reported inches</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Filtered Pagination (&gt;1,000)</div>
-          <div id="realDataKpiRange" class="kpi-value">—</div>
-          <div id="realDataKpiPageMeta" class="kpi-meta">Paginates filtered results</div>
+        <div class="archive-dates mono-text">
+          <span id="realDataApiUpdatedMeta">API Dataset Updated: Loading&hellip;</span>
+          <span aria-hidden="true">&middot;</span>
+          <span id="realDataLatestEventMeta">Latest Recorded Event: Loading&hellip;</span>
         </div>
       </div>
 
-      <!-- Search & Filter Controls -->
-      <form id="realDataFilterForm" class="filter-bar realdata-filter-bar">
+      <!-- Summary Metrics -->
+      <div class="kpi-strip-4">
+        <div class="kpi-box">
+          <div class="metric-label">Matching Historical Events</div>
+          <div id="realDataKpiTotal" class="kpi-num">&mdash;</div>
+          <div id="realDataKpiTotalMeta" class="metric-subtext">Filtered FloodNet archive</div>
+        </div>
+        <div class="kpi-box">
+          <div class="metric-label">Deployed FloodNet Sensors</div>
+          <div id="realDataKpiSensors" class="kpi-num">&mdash;</div>
+          <div class="metric-subtext">Joined via <code>sensor_id</code></div>
+        </div>
+        <div class="kpi-box">
+          <div class="metric-label">Peak Depth (This Page)</div>
+          <div id="realDataKpiPeakDepth" class="kpi-num">&mdash;</div>
+          <div id="realDataKpiPeakSensor" class="metric-subtext">Exact reported inches</div>
+        </div>
+        <div class="kpi-box">
+          <div class="metric-label">Filtered Record Range</div>
+          <div id="realDataKpiRange" class="kpi-num">&mdash;</div>
+          <div id="realDataKpiPageMeta" class="metric-subtext">Supports &gt;1,000 records</div>
+        </div>
+      </div>
+
+      <!-- Search & Filter Bar -->
+      <form id="realDataFilterForm" class="filter-bar">
         <div class="filter-group" style="flex:1;min-width:240px;">
           <input
             type="text"
             id="realDataSearchInput"
-            class="filter-input"
-            style="min-width:250px;flex:1;"
-            placeholder="Search sensor name, street, borough, or ZIP (e.g., Beach 84, Degraw, 11693)..."
-            aria-label="Search real NYC FloodNet sensor name or location"
+            class="form-control"
+            style="min-width:230px;flex:1;"
+            placeholder="Search sensor name, street, borough, or ZIP (e.g., Beach 84, Degraw)..."
+            aria-label="Search historical NYC FloodNet events"
           />
-          <select id="realDataBoroughFilter" class="filter-select" aria-label="Filter by Borough">
+          <select id="realDataBoroughFilter" class="form-control filter-select" aria-label="Filter by Borough">
             <option value="ALL">All Boroughs</option>
           </select>
-          <select id="realDataSensorFilter" class="filter-select" style="max-width:250px;" aria-label="Filter by Sensor">
+          <select id="realDataSensorFilter" class="form-control filter-select" style="max-width:230px;" aria-label="Filter by Sensor">
             <option value="ALL">All FloodNet Sensors</option>
           </select>
         </div>
 
         <div class="filter-group">
-          <label for="realDataStartDate" style="font-size:0.76rem;font-weight:700;color:var(--gray-600);">From:</label>
-          <input type="date" id="realDataStartDate" class="filter-input" aria-label="Filter start date" />
-          <label for="realDataEndDate" style="font-size:0.76rem;font-weight:700;color:var(--gray-600);">To:</label>
-          <input type="date" id="realDataEndDate" class="filter-input" aria-label="Filter end date" />
-          <select id="realDataPageSize" class="filter-select" aria-label="Records per page">
+          <label for="realDataStartDate" class="filter-inline-label">From</label>
+          <input type="date" id="realDataStartDate" class="form-control filter-date" aria-label="Start date" />
+          <label for="realDataEndDate" class="filter-inline-label">To</label>
+          <input type="date" id="realDataEndDate" class="form-control filter-date" aria-label="End date" />
+          <select id="realDataPageSize" class="form-control filter-select" aria-label="Rows per page">
             <option value="25">25 / page</option>
             <option value="50">50 / page</option>
             <option value="100">100 / page</option>
@@ -1072,43 +570,36 @@
         </div>
       </form>
 
-      <!-- Loading Indicator -->
-      <div id="realDataLoadingBox" class="realdata-state-box realdata-loading hidden" role="status" aria-live="polite">
-        <span class="realdata-spinner" aria-hidden="true"></span>
+      <!-- Loading / Error / Empty States -->
+      <div id="realDataLoadingBox" class="state-box hidden" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
         <div>
-          <strong>Fetching historical NYC FloodNet archive records...</strong>
-          <div style="font-size:0.8rem;color:var(--gray-600);">Querying NYC Open Data endpoints via <code>fetch()</code> and joining sensor metadata by <code>sensor_id</code>.</div>
+          <strong>Loading historical NYC FloodNet archive&hellip;</strong>
+          <div class="card-subtitle">Fetching public JSON records from NYC Open Data and joining metadata via <code>sensor_id</code>.</div>
         </div>
       </div>
 
-      <!-- API Error State -->
-      <div id="realDataErrorBox" class="realdata-state-box realdata-error hidden" role="alert">
+      <div id="realDataErrorBox" class="state-box state-error hidden" role="alert">
         <div>
-          <strong>Unable to retrieve NYC Open Data records</strong>
-          <p id="realDataErrorText" style="font-size:0.84rem;margin-top:4px;"></p>
+          <strong>Unable to load NYC Open Data records</strong>
+          <p id="realDataErrorText" class="card-subtitle" style="color:var(--crit-600);margin-top:4px;"></p>
         </div>
-        <button type="button" id="btnRetryRealData" class="btn btn-sm btn-danger">Retry Request</button>
+        <button type="button" id="btnRetryRealData" class="btn btn-sm btn-danger">Retry</button>
       </div>
 
-      <!-- Empty / No Results State -->
-      <div id="realDataEmptyBox" class="realdata-state-box hidden">
+      <div id="realDataEmptyBox" class="state-box hidden">
         <div>
           <strong>No historical flood events matched your filters</strong>
-          <p style="font-size:0.84rem;color:var(--gray-600);margin-top:4px;">
-            Try broadening your sensor/location search string, switching the borough or sensor selector back to All, or clearing the date range.
-          </p>
+          <p class="card-subtitle" style="margin-top:4px;">Try a broader search term, switch Borough/Sensor back to All, or clear the date range.</p>
         </div>
-        <button type="button" id="btnEmptyResetRealData" class="btn btn-sm btn-outline">Reset All Filters</button>
+        <button type="button" id="btnEmptyResetRealData" class="btn btn-sm btn-outline">Reset Filters</button>
       </div>
 
-      <!-- Real Historical Data Records Table -->
+      <!-- Historical Events Table -->
       <div id="realDataTableWrap" class="table-card" style="margin-bottom:22px;">
-        <div style="padding:12px 16px;border-bottom:1px solid var(--gray-200);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span class="dataset-badge dataset-badge-real">REAL HISTORICAL DATA</span>
-            <span id="realDataActiveSummary" style="font-size:0.82rem;font-weight:700;color:var(--navy-900);">Historical Flood Events</span>
-          </div>
-          <span id="realDataOffsetInfo" style="font-size:0.76rem;font-family:var(--font-mono);color:var(--gray-600);">Offset: 0</span>
+        <div class="table-card-header">
+          <div id="realDataActiveSummary" class="table-summary-title">Historical Flood Events (Newest Recorded First)</div>
+          <span id="realDataOffsetInfo" class="mono-subtext">Offset: 0</span>
         </div>
 
         <div class="table-responsive">
@@ -1116,10 +607,10 @@
             <thead>
               <tr>
                 <th>Sensor Name &amp; ID</th>
-                <th>Location (Joined Metadata via <code>sensor_id</code>)</th>
+                <th>Location (Joined Metadata)</th>
                 <th>Flood Start Date</th>
-                <th class="num-col">Max Flood Depth (in)</th>
-                <th class="num-col">Flood Duration (mins)</th>
+                <th class="num-col">Max Depth (in / cm)</th>
+                <th class="num-col">Duration</th>
                 <th>Bookmark</th>
               </tr>
             </thead>
@@ -1127,205 +618,176 @@
           </table>
         </div>
 
-        <!-- Pagination Bar (Operates on Filtered Results, Supports >1,000 Records) -->
-        <div id="realDataPaginationBar" class="realdata-pagination-bar">
-          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <div id="realDataPaginationBar" class="pagination-bar">
+          <div class="filter-group">
             <button type="button" id="btnRealPageFirst" class="btn btn-sm btn-outline">&laquo; First</button>
-            <button type="button" id="btnRealPagePrev" class="btn btn-sm btn-outline">&lsaquo; Previous</button>
-            <span id="realDataPageIndicator" class="realdata-page-indicator">Page 1 of 1</span>
+            <button type="button" id="btnRealPagePrev" class="btn btn-sm btn-outline">&lsaquo; Prev</button>
+            <span id="realDataPageIndicator" class="mono-page-indicator">Page 1 of 1</span>
             <button type="button" id="btnRealPageNext" class="btn btn-sm btn-outline">Next &rsaquo;</button>
             <button type="button" id="btnRealPageLast" class="btn btn-sm btn-outline">Last &raquo;</button>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <button type="button" id="btnJumpPast1000" class="btn btn-sm btn-primary" title="Jump past record 1,000 to verify pagination beyond SODA's default 1,000-row limit">
-              Jump Past 1,000th Record
-            </button>
-            <label for="realDataJumpPageInput" style="font-size:0.76rem;font-weight:700;color:var(--gray-600);">Go to Page:</label>
-            <input type="number" id="realDataJumpPageInput" class="filter-input" min="1" value="1" style="width:74px;padding:4px 8px;" />
+          <div class="filter-group">
+            <button type="button" id="btnJumpPast1000" class="btn btn-sm btn-outline">Jump Past #1,000</button>
+            <label for="realDataJumpPageInput" class="filter-inline-label">Page</label>
+            <input type="number" id="realDataJumpPageInput" class="form-control mono-input" min="1" value="1" style="width:72px;padding:4px 8px;" />
             <button type="button" id="btnRealPageGo" class="btn btn-sm btn-outline">Go</button>
           </div>
         </div>
       </div>
 
-      <!-- Per-User Saved Historical Flood Events (Supabase RLS Bookmarks) -->
-      <section id="realDataSavedPanel" class="form-card saved-events-panel" aria-labelledby="savedEventsHeading">
-        <div class="supabase-panel-header">
+      <!-- Per-User Saved Bookmarks Panel (Supabase RLS) -->
+      <section id="realDataSavedPanel" class="surface-card" aria-labelledby="savedEventsHeading">
+        <div class="card-header-row" style="margin-bottom:12px;">
           <div>
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
-              <span class="badge-db">Supabase Bookmarks • RLS Protected (auth.uid() = user_id)</span>
-              <span id="savedEventsCountBadge" class="status-badge badge-normal">0 Saved</span>
-            </div>
-            <h3 id="savedEventsHeading" style="font-size:1.05rem;font-weight:800;color:var(--navy-900);">
-              My Saved Historical Flood Events
-            </h3>
-            <p style="font-size:0.8rem;color:var(--gray-600);">
-              Bookmarked events from NYC Open Data stored privately per user in <code>saved_flood_events</code>. Duplicate bookmarks are prevented automatically.
-            </p>
+            <h2 id="savedEventsHeading" class="card-title">My Saved Historical Flood Events</h2>
+            <p class="card-subtitle">Personal bookmarks saved to Supabase (<code>saved_flood_events</code>) with Row Level Security so only you can view or delete your list.</p>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <button type="button" id="btnRefreshSavedEvents" class="btn btn-sm btn-outline">Refresh Saved List</button>
+          <div class="filter-group">
+            <span id="savedEventsCountBadge" class="status-tag tag-neutral">0 Saved</span>
+            <button type="button" id="btnRefreshSavedEvents" class="btn btn-sm btn-outline">Refresh</button>
           </div>
         </div>
         <div id="savedEventsPanelBody" aria-live="polite">
-          <p style="font-size:0.85rem;color:var(--gray-500);">Sign in to save and manage your personal historical flood event bookmarks.</p>
+          <p class="card-subtitle">Sign in to bookmark historical NYC FloodNet events.</p>
         </div>
       </section>
     </section>
 
     <!-- ==================================================================
-         VIEW 7: PROJECT & IoT HARDWARE ARCHITECTURE INFO (#view-about)
+         SECTION 4: ABOUT PROJECT (#view-about)
          ================================================================== -->
     <section id="view-about" class="view-section" aria-labelledby="aboutHeading">
       <div class="section-header">
         <div>
-          <h2 id="aboutHeading" class="section-title">NYC FloodGuard — IoT System Architecture &amp; Hardware Blueprint</h2>
-          <p class="section-subtitle">How ultrasonic edge sensors on an Arduino GIGA R1 WiFi connect to a cloud database and this human-centered web interface.</p>
+          <p class="eyebrow-text" style="color:var(--cyan-600);">Hardware &amp; Engineering Architecture</p>
+          <h1 id="aboutHeading" class="section-title">About NYC FloodGuard</h1>
+          <p class="section-subtitle">
+            How the physical tabletop prototype works, why it improves on passive flood logging, and how to safely connect your Arduino GIGA R1 WiFi.
+          </p>
         </div>
+        <button type="button" id="btnDownloadArduinoSketch" class="btn btn-primary">Download Arduino Firmware (.ino)</button>
       </div>
 
-      <div class="arch-grid">
-        <div class="arch-card">
-          <span class="borough-chip">Layer 1 • Edge Sensing Node</span>
-          <h3 style="font-size:1.05rem;font-weight:800;color:var(--navy-900);margin:6px 0;">Arduino GIGA R1 WiFi + Ultrasonic Transducer</h3>
-          <p style="font-size:0.84rem;color:var(--gray-600);margin-bottom:10px;">
-            Weatherproof ultrasonic sensors (JSN-SR04T / HC-SR04) are mounted on street light poles or bridge underpasses at a calibrated height <code>H_mount</code> above the street surface.
+      <!-- How NYC FloodGuard Improves on NYC FloodNet -->
+      <div class="about-grid-2" style="margin-bottom:20px;">
+        <article class="surface-card">
+          <h2 class="card-title" style="margin-bottom:8px;">What Makes NYC FloodGuard Different</h2>
+          <p class="card-subtitle" style="margin-bottom:12px;">
+            NYC FloodNet provides invaluable historical street flood observations across New York City. NYC FloodGuard builds on that inspiration by focusing on <strong>active early warning and drainage feedback</strong>:
           </p>
-          <p style="font-size:0.84rem;color:var(--gray-600);">
-            The dual-core STM32H747XI processor emits a 40 kHz acoustic pulse, measures the time-of-flight echo <code>t_echo</code>, applies temperature compensation, and transmits JSON payloads over onboard Murata Wi-Fi every 5 seconds.
-          </p>
-        </div>
+          <ul class="clean-list">
+            <li><strong>Rising-Water Velocity:</strong> Computes smoothed rate of change (<code>cm/min</code>) over a rolling window instead of looking only at static depth.</li>
+            <li><strong>Conservative Early-Warning ETA:</strong> Projects estimated time to Warning and Critical thresholds when water is rising reliably, and honestly shows <em>Not available</em> when water is stable, draining, or noisy.</li>
+            <li><strong>Drainage Monitoring:</strong> Explicitly detects falling water levels when the drainage pump operates so observers can verify that conditions are improving.</li>
+            <li><strong>Side-by-Side Real-World Context:</strong> Keeps prototype measurements clearly separated from authentic historical NYC FloodNet records.</li>
+          </ul>
+        </article>
 
-        <div class="arch-card">
-          <span class="borough-chip">Layer 2 • API &amp; Time-Series Database</span>
-          <h3 style="font-size:1.05rem;font-weight:800;color:var(--navy-900);margin:6px 0;">Low-Latency Ingestion &amp; Persistence</h3>
-          <p style="font-size:0.84rem;color:var(--gray-600);margin-bottom:10px;">
-            In production deployment, sensor nodes authenticate via TLS to a REST/WebSocket ingestion endpoint backed by PostgreSQL / TimescaleDB for shared multi-user persistence.
-          </p>
-          <p style="font-size:0.84rem;color:var(--gray-600);">
-            In this prototype, <code>script.js</code> encapsulates all data calls inside a modular <code>FloodGuardAPI</code> class that uses browser <code>localStorage</code> as a local drop-in store until the backend URL is enabled.
-          </p>
-        </div>
-
-        <div class="arch-card">
-          <span class="borough-chip">Layer 3 • Human-Centered Web UI</span>
-          <h3 style="font-size:1.05rem;font-weight:800;color:var(--navy-900);margin:6px 0;">Resilient, Role-Adaptive Frontend</h3>
-          <p style="font-size:0.84rem;color:var(--gray-600);margin-bottom:10px;">
-            Displays new readings within 5 seconds of receipt, automatically highlights outdated sensor data (&gt;15s old), and survives temporary internet drops without crashing.
-          </p>
-          <p style="font-size:0.84rem;color:var(--gray-600);">
-            Uses a high-contrast Navy, White, Cyan, and Slate Gray palette while reserving Orange and Red strictly for flood warnings.
-          </p>
-        </div>
+        <article class="surface-card">
+          <h2 class="card-title" style="margin-bottom:8px;">How Flood Detection &amp; Early Warning Work</h2>
+          <div class="formula-box">
+            Water Depth (cm) = Sensor Mounting Height (cm) &minus; Measured Distance to Water (cm)
+          </div>
+          <ul class="clean-list">
+            <li><strong>Step 1 &mdash; Calibrated Ultrasonic Depth:</strong> The HC-SR04 measures air distance to the water surface in centimeters. Subtracting from the dry mounting height yields water depth.</li>
+            <li><strong>Step 2 &mdash; Splash &amp; Ripple Filtering:</strong> On-board 5-ping median filtering plus a browser rolling median window suppress ripples and sudden single-frame echo spikes.</li>
+            <li><strong>Step 3 &mdash; Trend &amp; Threshold Evaluation:</strong> Linear regression computes slope (<code>cm/min</code>) and goodness-of-fit (<code>R&sup2;</code>). Status maps clearly to <strong>NORMAL</strong> (Green), <strong>WARNING</strong> (Orange), and <strong>CRITICAL</strong> (Red).</li>
+            <li><strong>Step 4 &mdash; Mathematical Projection:</strong> When rising reliably, <code>ETA = (Threshold &minus; Depth) / Rise Rate</code>. This is a mathematical projection, not a guaranteed weather forecast.</li>
+          </ul>
+        </article>
       </div>
 
-      <!-- Interactive Ultrasonic Physics & Arduino Formula Simulator -->
-      <div class="charts-grid">
-        <div class="form-card">
-          <h3 style="font-size:1.02rem;font-weight:800;color:var(--navy-900);margin-bottom:6px;">Interactive Ultrasonic Water-Depth Calculator</h3>
-          <p style="font-size:0.82rem;color:var(--gray-600);margin-bottom:14px;">
-            Test the exact acoustic formula executed by the Arduino GIGA R1 WiFi firmware:
-            <code>d_air = (t_echo * 0.0343) / 2</code> and <code>Water_Depth = H_mount - d_air</code>.
-          </p>
-
-          <div class="form-group">
-            <label for="calcMountHeight" class="form-label">
-              Sensor Pole Mount Height above Street (<code>H_mount</code>): <strong id="calcMountVal">250 cm (98.4 in)</strong>
-            </label>
-            <input type="range" id="calcMountHeight" min="150" max="400" step="5" value="250" style="width:100%;accent-color:var(--navy-800);" />
+      <!-- Physical Prototype Hardware Overview -->
+      <section class="surface-card" style="margin-bottom:20px;">
+        <h2 class="card-title" style="margin-bottom:12px;">Physical Prototype Hardware Components</h2>
+        <div class="hardware-grid">
+          <div class="hw-item">
+            <h3>Arduino GIGA R1 WiFi</h3>
+            <p>Dual-core STM32H747XI microcontroller (3.3V GPIO logic) reading ultrasonic pulses, float switches, and streaming JSON over USB Serial at 115200 baud.</p>
           </div>
-
-          <div class="form-group">
-            <label for="calcEchoUs" class="form-label">
-              Ultrasonic Echo Pulse Round-Trip Time (<code>t_echo</code>): <strong id="calcEchoVal">12,500 &mu;s</strong>
-            </label>
-            <input type="range" id="calcEchoUs" min="4000" max="14500" step="100" value="12500" style="width:100%;accent-color:var(--cyan-600);" />
+          <div class="hw-item">
+            <h3>Arduino GIGA Display Shield</h3>
+            <p>Local touchscreen display module planned for on-model water depth and warning status readout alongside the web dashboard.</p>
           </div>
-
-          <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius-sm);padding:14px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;text-align:center;">
-            <div>
-              <div style="font-size:0.72rem;color:var(--gray-500);text-transform:uppercase;font-weight:700;">Measured Air Gap</div>
-              <div id="calcDistResult" style="font-size:1.2rem;font-weight:800;font-family:var(--font-mono);color:var(--navy-900);">214.4 cm</div>
-            </div>
-            <div>
-              <div style="font-size:0.72rem;color:var(--gray-500);text-transform:uppercase;font-weight:700;">Computed Water Depth</div>
-              <div id="calcDepthResult" style="font-size:1.2rem;font-weight:800;font-family:var(--font-mono);color:var(--cyan-600);">14.0 in (35.6 cm)</div>
-            </div>
-            <div>
-              <div style="font-size:0.72rem;color:var(--gray-500);text-transform:uppercase;font-weight:700;">Threshold Evaluation</div>
-              <div id="calcStatusResult" style="font-size:0.9rem;font-weight:800;color:var(--crit-600);margin-top:4px;">CRITICAL FLOOD</div>
-            </div>
+          <div class="hw-item">
+            <h3>HC-SR04 Ultrasonic Sensor</h3>
+            <p>Mounted above the 3D-printed street surface to measure air distance to water continuously without contacting floodwater.</p>
+          </div>
+          <div class="hw-item">
+            <h3>Float Switches</h3>
+            <p>Physical backup water-level switches (Low &amp; High) wired with <code>INPUT_PULLUP</code> to verify water contact independently of ultrasonic echoes.</p>
+          </div>
+          <div class="hw-item">
+            <h3>Two Water Pumps (Manual Demo)</h3>
+            <p>One inflow pump to simulate rising street flooding and one drainage pump to demonstrate falling water recovery. Operated manually until relay hardware is added.</p>
+          </div>
+          <div class="hw-item">
+            <h3>3D-Printed NYC Street Model &amp; Optional Barrier</h3>
+            <p>Scale NYC street and building basin for controlled testing, with optional future support for a servo-controlled flood barrier.</p>
           </div>
         </div>
+      </section>
 
-        <!-- Arduino GIGA R1 WiFi Firmware & REST Payload Blueprint -->
-        <div class="form-card">
-          <h3 style="font-size:1.02rem;font-weight:800;color:var(--navy-900);margin-bottom:6px;">Arduino GIGA R1 WiFi Telemetry JSON Contract</h3>
-          <p style="font-size:0.82rem;color:var(--gray-600);margin-bottom:10px;">
-            Standard payload structure sent by the Arduino GIGA R1 WiFi to <code>POST /api/v1/telemetry</code> and processed by <code>script.js</code>:
+      <!-- Wiring Safety, Serial JSON & Calibration -->
+      <div class="about-grid-2" style="margin-bottom:20px;">
+        <section class="surface-card">
+          <h2 class="card-title" style="margin-bottom:8px;">3.3V GPIO Safety &amp; Sensor Calibration</h2>
+          <div class="inline-notice notice-warn" style="margin-bottom:12px;">
+            <strong>Critical 3.3V Warning (Arduino GIGA R1 WiFi):</strong> GIGA R1 GPIO pins are <strong>3.3V only</strong> and are NOT 5V tolerant. A standard 5V HC-SR04 outputs 5V on its <code>ECHO</code> pin &mdash; always connect <code>ECHO</code> through a <strong>1 k&Omega; / 2 k&Omega; voltage divider</strong> (steps 5V down to 3.33V) or a 5V-to-3.3V logic level shifter before wiring to pin <code>D9</code>.
+          </div>
+          <ul class="clean-list">
+            <li><strong>Wiring:</strong> <code>VCC &rarr; 5V</code>, <code>GND &rarr; GND</code>, <code>TRIG &rarr; D8</code>, <code>ECHO &rarr; 1k&Omega;/2k&Omega; divider &rarr; D9</code>, Float switches &rarr; <code>D6 / D7</code> to <code>GND</code>.</li>
+            <li><strong>Calibration:</strong> Empty the 3D-printed street model completely dry, measure the distance from the HC-SR04 sensor face to the street floor (in cm), and set <code>MOUNT_HEIGHT_CM</code> in both the sketch and Administrator Settings.</li>
+            <li><strong>Browser Requirement:</strong> Web Serial requires desktop Google Chrome or Microsoft Edge over HTTPS or localhost.</li>
+          </ul>
+        </section>
+
+        <section class="surface-card">
+          <h2 class="card-title" style="margin-bottom:8px;">USB Serial JSON Format (115200 baud)</h2>
+          <p class="card-subtitle" style="margin-bottom:10px;">
+            The firmware emits one newline-terminated JSON object per second (<code>arduino/nyc_floodguard_giga.ino</code>):
           </p>
           <pre class="code-block">{
-  "node_id": "GIGA-BK-01",
-  "hardware": "Arduino GIGA R1 WiFi (STM32H747XI)",
-  "sensor_model": "JSN-SR04T Waterproof Ultrasonic",
-  "mount_height_cm": 250.0,
-  "echo_time_us": 12150,
-  "measured_distance_cm": 208.34,
-  "computed_water_depth_cm": 41.66,
-  "computed_water_depth_in": 16.40,
-  "battery_v": 12.6,
-  "wifi_rssi_dbm": -61,
-  "timestamp_iso": "2026-11-09T17:13:15Z"
+  "device": "GIGA-R1-WIFI",
+  "mount_height_cm": 25.00,
+  "distance_cm": 18.40,
+  "water_depth_cm": 6.60,
+  "float_low": true,
+  "float_high": false,
+  "barrier_state": "not_installed",
+  "uptime_ms": 14200
 }</pre>
-          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
-            <button type="button" id="btnDownloadHtmlFile" class="btn btn-sm btn-primary">Download index.html</button>
-            <button type="button" id="btnDownloadCssFile" class="btn btn-sm btn-primary">Download style.css</button>
-            <button type="button" id="btnDownloadJsFile" class="btn btn-sm btn-primary">Download script.js</button>
+        </section>
+      </div>
+
+      <!-- Honest Completed vs. Planned Status -->
+      <section class="surface-card">
+        <h2 class="card-title" style="margin-bottom:12px;">Project Status: Completed vs. Planned Features</h2>
+        <div class="about-grid-2">
+          <div>
+            <h3 class="sub-heading status-text-normal">Completed &amp; Working</h3>
+            <ul class="clean-list">
+              <li>Supabase email authentication (register, sign in, logout, password reset, persistent sessions).</li>
+              <li>Real Web Serial USB connection for Arduino GIGA R1 WiFi with backup simulation mode.</li>
+              <li>Centimeter water-depth math, median ripple filtering, rising/falling drainage trend, and conservative threshold ETA.</li>
+              <li>Official NYC FloodNet historical API search, filtering, pagination (&gt;1,000 rows), and per-user Supabase bookmarks.</li>
+              <li>SQL migration prepared for database-enforced Administrator / Regular User roles and RLS-protected threshold settings.</li>
+            </ul>
+          </div>
+          <div>
+            <h3 class="sub-heading status-text-warn">Planned / Requires Hardware or Setup</h3>
+            <ul class="clean-list">
+              <li><strong>Wi-Fi Cloud Sync (Unfinished):</strong> Direct automatic upload from Arduino GIGA R1 WiFi to Supabase tables over Wi-Fi.</li>
+              <li><strong>Automatic Pump Control (Planned):</strong> Relay driver circuit &amp; safety interlock firmware (pumps are currently manual).</li>
+              <li><strong>Servo Flood Barrier (Optional Future):</strong> Firmware hook included (<code>ENABLE_SERVO_BARRIER</code>), not required for primary demo.</li>
+              <li><strong>GIGA Display Shield UI (Planned):</strong> On-device local readout screen mirroring serial depth &amp; warnings.</li>
+            </ul>
           </div>
         </div>
-      </div>
+      </section>
     </section>
 
   </main>
-
-  <!-- ====================================================================
-       IN-PAGE MODALS (NO BROWSER alert/confirm/prompt)
-       ==================================================================== -->
-  <!-- Delete Station Confirmation Modal -->
-  <div id="deleteConfirmModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="deleteModalTitle">
-    <div class="modal-dialog" style="max-width:460px;">
-      <h3 id="deleteModalTitle" style="font-size:1.1rem;font-weight:800;color:var(--navy-900);margin-bottom:8px;">Delete Monitoring Location?</h3>
-      <p style="font-size:0.88rem;color:var(--gray-600);margin-bottom:18px;">
-        Are you sure you want to remove <strong id="deleteModalStationName">this station</strong> from the NYC FloodGuard network? Historical logs for this station will also be removed from browser storage.
-      </p>
-      <div style="display:flex;justify-content:flex-end;gap:10px;">
-        <button type="button" id="btnCancelDeleteStation" class="btn btn-outline">Cancel</button>
-        <button type="button" id="btnConfirmDeleteStation" class="btn btn-danger">Delete Station</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Server Deployment Files Modal -->
-  <div id="serverFilesModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="serverModalTitle">
-    <div class="modal-dialog">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <h3 id="serverModalTitle" style="font-size:1.15rem;font-weight:800;color:var(--navy-900);">3 Connected Server Files (Ready for Upload)</h3>
-        <button type="button" id="btnCloseServerModal" class="btn btn-sm btn-outline">Close</button>
-      </div>
-      <p style="font-size:0.86rem;color:var(--gray-600);margin-bottom:14px;">
-        NYC FloodGuard is structured into three separate, cleanly commented files that link together in any standard web server directory:
-      </p>
-      <ul style="font-size:0.85rem;color:var(--gray-700);margin-bottom:16px;padding-left:20px;line-height:1.7;">
-        <li><strong>1. index.html</strong> — Semantic HTML5 structure, accessible landmarks, SVG NYC map, and links to <code>style.css</code> and <code>script.js</code>.</li>
-        <li><strong>2. style.css</strong> — Responsive layout, Navy/White/Cyan/Gray theme, and Orange/Red warning indicators.</li>
-        <li><strong>3. script.js</strong> — Modular <code>FloodGuardAPI</code> service layer, 5-second simulated telemetry engine, interactive HTML5 Canvas charts, stale sensor detection, and full CRUD.</li>
-      </ul>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <button type="button" id="btnModalDlHtml" class="btn btn-cyan">1. Download index.html</button>
-        <button type="button" id="btnModalDlCss" class="btn btn-cyan">2. Download style.css</button>
-        <button type="button" id="btnModalDlJs" class="btn btn-cyan">3. Download script.js</button>
-      </div>
-    </div>
-  </div>
 
   <!-- Toast Notification Container -->
   <div id="toastContainer" class="toast-container" aria-live="polite"></div>
@@ -1336,15 +798,14 @@
   <footer class="site-footer">
     <div class="footer-inner">
       <div>
-        <strong style="color:var(--white);">NYC FloodGuard</strong> — Human-Centered IoT Urban Flood Monitoring Prototype (Arduino GIGA R1 WiFi + Ultrasonic Sensor Network).
+        <strong>NYC FloodGuard</strong> &mdash; Urban Flood Early-Warning &amp; Drainage Monitoring Prototype
       </div>
       <div>
-        Educational Prototype Only • Simulated Sensor Data • Browser <code>localStorage</code> Persistence
+        Educational engineering prototype only &middot; Not an official NYC emergency warning service
       </div>
     </div>
   </footer>
 
-  <!-- External JavaScript (Bundled as ES Module for Supabase + Server Deployment) -->
   <script type="module" src="./script.js"></script>
 </body>
 </html>
