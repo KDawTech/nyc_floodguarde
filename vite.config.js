@@ -5,6 +5,8 @@ export default defineConfig({
   // and on GitHub Pages subpaths (https://kdawtech.github.io/nyc_floodguarde/).
   base: './',
   server: {
+    // Allow preview proxy hostnames (e.g. Cloud Run *.run.app) in Vite 6
+    allowedHosts: true,
     // Disable HMR WebSocket when DISABLE_HMR=true (e.g., preview proxy environments
     // that do not forward Vite's dev HMR WebSocket), while keeping HMR active locally.
     hmr: process.env.DISABLE_HMR !== 'true'

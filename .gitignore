@@ -1,0 +1,15 @@
+# Dependencies & build output
+node_modules/
+dist/
+
+# Local environment secrets (never commit GEMINI_API_KEY or private keys)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs & OS artifacts
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db

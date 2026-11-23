@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: nyc-floodguard-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run start:api
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ALLOWED_ORIGINS
+        value: https://kdawtech.github.io
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: "15"
+      - key: GEMINI_API_KEY
+        sync: false

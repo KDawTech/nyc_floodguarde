@@ -173,19 +173,29 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
       consecutiveOutOfRange: 0,
       recentOutOfRangeCount: 0,
       recentSpikeCount: 0,
+      recentSuspiciousCount: 0,
       latestPacket: null
     };
   }
 
   const processedPackets = [];
   let acceptedDistances = [];
+  let acceptedDepths = [];
   const validFilteredSeries = [];
   let pendingJumpCandidate = null;
 
   for (let i = 0; i < rawPackets.length; i++) {
     const pkt = rawPackets[i];
     const mount = Number.isFinite(pkt.mountHeightCm) ? pkt.mountHeightCm : cfg.mountHeightCm;
-    const validation = validateDistanceReading(mount, pkt.distanceCm, cfg, pkt.errorCode || null);
+    const isAuthoritativeText = pkt.format === 'text' && Number.isFinite(pkt.reportedDepthCm);
+
+    // Physical validation of distance (wider upper tolerance for dry acoustic scatter so
+    // authoritative Arduino 0.00 cm dry readings like 15.78 cm are flagged as suspicious
+    // scatter rather than inventing water depth or crashing the baseline).
+    const validationCfg = isAuthoritativeText
+      ? { ...cfg, dryToleranceCm: Math.max(cfg.dryToleranceCm, 3.5) }
+      : cfg;
+    const validation = validateDistanceReading(mount, pkt.distanceCm, validationCfg, pkt.errorCode || null);
 
     if (!validation.valid) {
       pendingJumpCandidate = null;
@@ -194,9 +204,12 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
         mountHeightCm: Number(mount.toFixed(2)),
         rawDistanceCm: validation.rawDistanceCm,
         rawDepthCm: null,
+        reportedDepthCm: Number.isFinite(pkt.reportedDepthCm) ? Number(pkt.reportedDepthCm.toFixed(2)) : null,
         valid: false,
         isOutOfRange: true,
         isSpike: false,
+        isSuspicious: true,
+        suspiciousReason: validation.reason,
         invalidReason: validation.reason,
         reportedStatus: pkt.reportedStatus || null,
         packetFormat: pkt.format || 'json',
@@ -207,7 +220,67 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
       continue;
     }
 
-    // Isolated spike detection against recent trailing median (once >= 3 accepted points exist)
+    // Suspicious reading checks (flagged honestly without inventing measurements)
+    let isSuspicious = false;
+    let suspiciousReason = '';
+
+    if (isAuthoritativeText) {
+      // Check 1: Dry-road acoustic scatter well above the locked dry baseline
+      if (pkt.reportedDepthCm === 0 && validation.rawDistanceCm > mount + 1.25) {
+        isSuspicious = true;
+        suspiciousReason = `Dry distance (${validation.rawDistanceCm.toFixed(2)} cm) is +${(validation.rawDistanceCm - mount).toFixed(2)} cm above locked baseline (${mount.toFixed(2)} cm) — echo scatter`;
+      }
+      // Check 2: Baseline mismatch during positive water depth (do NOT overwrite baseline!)
+      if (pkt.reportedDepthCm > 0.05) {
+        const impliedBaseline = validation.rawDistanceCm + pkt.reportedDepthCm;
+        const baselineDrift = Math.abs(impliedBaseline - mount);
+        if (baselineDrift > 0.75) {
+          isSuspicious = true;
+          suspiciousReason = `Distance + Depth (${impliedBaseline.toFixed(2)} cm) differs from locked baseline (${mount.toFixed(2)} cm) by ${baselineDrift.toFixed(2)} cm — verify riser / recalibrate when dry`;
+        }
+      }
+      // Check 3: Sudden single-frame depth jump (> 2.0 cm vs recent median)
+      if (acceptedDepths.length >= 3) {
+        const refMedianDepth = medianOf(acceptedDepths.slice(-5));
+        const depthJump = Math.abs(pkt.reportedDepthCm - refMedianDepth);
+        if (depthJump > 2.0) {
+          isSuspicious = true;
+          suspiciousReason = `Sudden single-reading depth jump of ${depthJump.toFixed(2)} cm vs. recent median (${refMedianDepth.toFixed(2)} cm)`;
+        }
+      }
+
+      acceptedDistances.push(validation.rawDistanceCm);
+      acceptedDepths.push(pkt.reportedDepthCm);
+
+      // Authoritative Arduino text values: preserve exact reported water depth & distance
+      const authoritativeDepth = Math.max(0, Number(pkt.reportedDepthCm.toFixed(2)));
+      const entry = {
+        timestampMs: pkt.timestampMs,
+        mountHeightCm: Number(mount.toFixed(2)),
+        rawDistanceCm: validation.rawDistanceCm,
+        rawDepthCm: authoritativeDepth,
+        reportedDepthCm: authoritativeDepth,
+        filteredDistanceCm: validation.rawDistanceCm,
+        filteredDepthCm: authoritativeDepth,
+        filterWindowSize: 1,
+        valid: true,
+        isOutOfRange: false,
+        isSpike: false,
+        isSuspicious,
+        suspiciousReason,
+        invalidReason: '',
+        reportedStatus: pkt.reportedStatus || null,
+        packetFormat: pkt.format || 'text',
+        burstSpreadCm: pkt.burstSpreadCm ?? null,
+        validPings: pkt.validPings ?? null,
+        firmwareQuality: pkt.firmwareQuality || null
+      };
+      processedPackets.push(entry);
+      validFilteredSeries.push(entry);
+      continue;
+    }
+
+    // Non-text streams (JSON firmware or Demo Mode): isolated spike rejection + 3-sample median
     let isSpike = false;
     let spikeReason = '';
     if (acceptedDistances.length >= 3) {
@@ -220,7 +293,6 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
           pendingJumpCandidate != null &&
           Math.abs(validation.rawDistanceCm - pendingJumpCandidate) <= cfg.spikeJumpCm * 0.6
         ) {
-          // Confirmed sustained step shift — reset baseline to new level
           pendingJumpCandidate = null;
           acceptedDistances = [validation.rawDistanceCm];
         } else {
@@ -235,29 +307,27 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
 
     if (!isSpike) {
       acceptedDistances.push(validation.rawDistanceCm);
-
-      // Arduino text serial lines ("Distance: ... | Water Depth: ... | Status: ...") are
-      // already median-filtered on the microcontroller, so avoid double-median lag (which
-      // would misalign displayed depth with the Arduino's confirmed status). Keep the
-      // 3-sample causal median filter for raw JSON streams.
       const nAcc = acceptedDistances.length;
-      const isPreFilteredText = pkt.format === 'text';
-      const winSize = isPreFilteredText ? 1 : nAcc >= 3 ? 3 : 1;
+      const winSize = nAcc >= 3 ? 3 : 1;
       const trailingSlice = acceptedDistances.slice(-winSize);
       const filteredDistanceCm = Number(medianOf(trailingSlice).toFixed(2));
       const filteredDepthCm = Math.max(0, Number((mount - filteredDistanceCm).toFixed(2)));
+      acceptedDepths.push(filteredDepthCm);
 
       const entry = {
         timestampMs: pkt.timestampMs,
         mountHeightCm: Number(mount.toFixed(2)),
         rawDistanceCm: validation.rawDistanceCm,
         rawDepthCm: validation.rawDepthCm,
+        reportedDepthCm: Number.isFinite(pkt.reportedDepthCm) ? Number(pkt.reportedDepthCm.toFixed(2)) : null,
         filteredDistanceCm,
         filteredDepthCm,
         filterWindowSize: winSize,
         valid: true,
         isOutOfRange: false,
         isSpike: false,
+        isSuspicious: false,
+        suspiciousReason: '',
         invalidReason: '',
         reportedStatus: pkt.reportedStatus || null,
         packetFormat: pkt.format || 'json',
@@ -273,11 +343,14 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
         mountHeightCm: Number(mount.toFixed(2)),
         rawDistanceCm: validation.rawDistanceCm,
         rawDepthCm: validation.rawDepthCm,
+        reportedDepthCm: null,
         filteredDistanceCm: null,
         filteredDepthCm: null,
         valid: true,
         isOutOfRange: false,
         isSpike: true,
+        isSuspicious: true,
+        suspiciousReason: spikeReason,
         invalidReason: spikeReason,
         reportedStatus: pkt.reportedStatus || null,
         packetFormat: pkt.format || 'json',
@@ -297,6 +370,7 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
   const recentWindow = processedPackets.slice(-8);
   const recentOutOfRangeCount = recentWindow.filter((p) => p.isOutOfRange).length;
   const recentSpikeCount = recentWindow.filter((p) => p.isSpike).length;
+  const recentSuspiciousCount = recentWindow.filter((p) => p.isSuspicious).length;
 
   return {
     processedPackets,
@@ -304,6 +378,7 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
     consecutiveOutOfRange,
     recentOutOfRangeCount,
     recentSpikeCount,
+    recentSuspiciousCount,
     latestPacket: processedPackets[processedPackets.length - 1] || null
   };
 }
@@ -459,11 +534,19 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
       residualStdCm: 0,
       isReliableRise: false,
       isReliableFall: false,
-      etaWarning: { available: false, reached: false, seconds: null, label: 'Not available' },
-      etaCritical: { available: false, reached: false, seconds: null, label: 'Not available' },
+      predictionConfidence: 'INSUFFICIENT_DATA',
+      predictionConfidenceLabel: 'Insufficient Data',
+      predictionLimitation: 'Linear trend extrapolation requires at least 4 clean readings over 3 seconds (not a validated weather forecast).',
+      etaWarning: { available: false, reached: false, seconds: null, label: 'Insufficient Data' },
+      etaCritical: { available: false, reached: false, seconds: null, label: 'Insufficient Data' },
       filteredSamples: [],
       sampleCount: 0,
-      lastUpdatedMs: null
+      lastUpdatedMs: null,
+      suspiciousReading: false,
+      suspiciousReason: '',
+      recentSuspiciousCount: 0,
+      authoritativeArduino: false,
+      alertConfidenceNote: ''
     };
   }
 
@@ -473,6 +556,7 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     consecutiveOutOfRange,
     recentOutOfRangeCount,
     recentSpikeCount,
+    recentSuspiciousCount,
     latestPacket
   } = processed;
 
@@ -504,11 +588,19 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
       residualStdCm: 0,
       isReliableRise: false,
       isReliableFall: false,
-      etaWarning: { available: false, reached: false, seconds: null, label: 'Not available' },
-      etaCritical: { available: false, reached: false, seconds: null, label: 'Not available' },
+      predictionConfidence: 'INSUFFICIENT_DATA',
+      predictionConfidenceLabel: 'Insufficient Data',
+      predictionLimitation: 'Prediction disabled while ultrasonic readings are Out of Range.',
+      etaWarning: { available: false, reached: false, seconds: null, label: 'Insufficient Data' },
+      etaCritical: { available: false, reached: false, seconds: null, label: 'Insufficient Data' },
       filteredSamples: validFilteredSeries,
       sampleCount: validFilteredSeries.length,
-      lastUpdatedMs: latestPacket?.timestampMs ?? null
+      lastUpdatedMs: latestPacket?.timestampMs ?? null,
+      suspiciousReading: true,
+      suspiciousReason: latestPacket?.suspiciousReason || latestPacket?.invalidReason || 'Out of valid ultrasonic range',
+      recentSuspiciousCount,
+      authoritativeArduino: false,
+      alertConfidenceNote: 'Sensor out of range — no flood depth fabricated.'
     };
   }
 
@@ -516,6 +608,7 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
   const filteredDepthCm = latestValid.filteredDepthCm;
   const filteredDistanceCm = latestValid.filteredDistanceCm;
   const mountHeightCm = latestValid.mountHeightCm;
+  const authoritativeArduino = latestValid.packetFormat === 'text' && latestValid.reportedDepthCm != null;
 
   const stabilizedSeries =
     validFilteredSeries.length >= 7
@@ -543,9 +636,10 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
   if (latestPacket?.isOutOfRange) {
     sensorQuality = 'OUT_OF_RANGE';
     sensorQualityLabel = 'Out of Range';
-    sensorQualityReason = `${latestPacket.invalidReason} (isolated reading rejected; holding previous filtered value)`;
+    sensorQualityReason = `${latestPacket.invalidReason} (isolated reading rejected; holding previous value)`;
   } else if (
     latestPacket?.isSpike ||
+    latestPacket?.isSuspicious ||
     recentSpikeCount >= 2 ||
     recentOutOfRangeCount >= 2 ||
     stats.residualStdCm > cfg.maxGoodResidualStdCm ||
@@ -556,7 +650,9 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
   ) {
     sensorQuality = 'UNSTABLE';
     sensorQualityLabel = 'Unstable';
-    if (latestPacket?.isSpike) {
+    if (latestPacket?.isSuspicious && latestPacket.suspiciousReason) {
+      sensorQualityReason = latestPacket.suspiciousReason;
+    } else if (latestPacket?.isSpike) {
       sensorQualityReason = latestPacket.invalidReason;
     } else if (latestTooFewPings) {
       sensorQualityReason = `Only ${latestPacket.validPings}/5 ultrasonic pings returned valid echoes`;
@@ -573,6 +669,8 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     ? 'OUT_OF_RANGE'
     : latestPacket?.isSpike
     ? 'SPIKE_REJECTED'
+    : latestPacket?.isSuspicious
+    ? 'SUSPICIOUS'
     : 'VALID';
 
   // Statistically reliable trend classification (scaled cleanly for miniature street model depths)
@@ -593,7 +691,7 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     trendDetail =
       sensorQuality === 'OUT_OF_RANGE'
         ? 'Latest ultrasonic reading out of range — trend and ETA paused'
-        : 'Signal noise or spike detected — trend cannot be confirmed reliably';
+        : 'Suspicious reading or echo jitter flagged — short-term trend uncertain';
   } else if (!enoughData) {
     trend = 'UNCERTAIN';
     trendLabel = 'Collecting baseline…';
@@ -621,13 +719,12 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     } else {
       trend = 'UNCERTAIN';
       trendLabel = 'Uncertain';
-      trendDetail = `Change is not statistically consistent yet (R² = ${stats.rSquared.toFixed(2)}, t = ${stats.tStat.toFixed(1)})`;
+      trendDetail = `Short-term direction not yet statistically consistent (R² = ${stats.rSquared.toFixed(2)}, t = ${stats.tStat.toFixed(1)})`;
     }
   }
 
   // Evaluate flood status:
-  // If Arduino sent a confirmed status in its text serial line (e.g. "Status: WARNING"),
-  // honor it directly; otherwise compute from active threshold configuration.
+  // Arduino confirmed status on calibrated text lines is ALWAYS authoritative.
   let status = 'NORMAL';
   let statusSource = 'thresholds';
   if (latestValid.packetFormat === 'text' && latestValid.reportedStatus) {
@@ -639,15 +736,70 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     status = 'WARNING';
   }
 
-  const etaWarning =
+  // Explicitly distinguish uncertain short-term trend from a confirmed flood alert
+  let alertConfidenceNote = '';
+  if ((status === 'CRITICAL' || status === 'WARNING') && trend === 'UNCERTAIN') {
+    alertConfidenceNote =
+      statusSource === 'arduino_confirmed'
+        ? `Confirmed ${status} alert from Arduino remains active even while short-term trend is uncertain.`
+        : `${status} threshold is currently exceeded even though short-term trend direction is uncertain.`;
+  } else if ((status === 'CRITICAL' || status === 'WARNING') && statusSource === 'arduino_confirmed') {
+    alertConfidenceNote = `Authoritative ${status} status confirmed by Arduino (3-reading verification).`;
+  }
+
+  const rawEtaWarn =
     sensorQuality === 'GOOD' && (filteredDepthCm >= cfg.warnThresholdCm || status === 'WARNING' || status === 'CRITICAL')
       ? { available: true, reached: true, seconds: 0, label: 'Threshold reached' }
       : projectThresholdEta(filteredDepthCm, cfg.warnThresholdCm, stats.slopeCmPerMin, sensorQuality === 'GOOD' && isReliableRise);
 
-  const etaCritical =
+  const rawEtaCrit =
     sensorQuality === 'GOOD' && (filteredDepthCm >= cfg.critThresholdCm || status === 'CRITICAL')
       ? { available: true, reached: true, seconds: 0, label: 'Threshold reached' }
       : projectThresholdEta(filteredDepthCm, cfg.critThresholdCm, stats.slopeCmPerMin, sensorQuality === 'GOOD' && isReliableRise);
+
+  // Use clear "Insufficient Data" label whenever ETA projection cannot be reliably computed
+  const etaWarning = rawEtaWarn.available
+    ? rawEtaWarn
+    : { ...rawEtaWarn, label: 'Insufficient Data' };
+  const etaCritical = rawEtaCrit.available
+    ? rawEtaCrit
+    : { ...rawEtaCrit, label: 'Insufficient Data' };
+
+  // Prediction confidence & transparent limitations
+  let predictionConfidence = 'INSUFFICIENT_DATA';
+  let predictionConfidenceLabel = 'Insufficient Data';
+  let predictionLimitation =
+    'Trend extrapolation only (assumes constant rise rate; not a validated weather or hydraulic forecast).';
+
+  if (sensorQuality !== 'GOOD') {
+    predictionConfidence = 'INSUFFICIENT_DATA';
+    predictionConfidenceLabel = 'Insufficient Data';
+    predictionLimitation = `Prediction suppressed while sensor quality is ${sensorQualityLabel} (splashes, spikes, or invalid echoes).`;
+  } else if (!enoughData) {
+    predictionConfidence = 'INSUFFICIENT_DATA';
+    predictionConfidenceLabel = 'Insufficient Data';
+    predictionLimitation = `Collecting rolling baseline (${rollingWindow.length}/4 clean readings over ≥ 3s).`;
+  } else if (isReliableRise) {
+    if (rollingWindow.length >= 6 && stats.rSquared >= 0.85 && stats.tStat >= 4.0) {
+      predictionConfidence = 'HIGH';
+      predictionConfidenceLabel = `High (R² = ${stats.rSquared.toFixed(2)}, n = ${rollingWindow.length})`;
+    } else {
+      predictionConfidence = 'MODERATE';
+      predictionConfidenceLabel = `Moderate (R² = ${stats.rSquared.toFixed(2)}, n = ${rollingWindow.length})`;
+    }
+    predictionLimitation =
+      'Short-term linear extrapolation assuming current rise rate continues; not a validated weather forecast.';
+  } else if (trend === 'STABLE' || trend === 'FALLING') {
+    predictionConfidence = 'NOT_RISING';
+    predictionConfidenceLabel = trend === 'FALLING' ? 'Not Rising (Receding)' : 'Not Rising (Stable)';
+    predictionLimitation =
+      'Threshold arrival ETA is only projected when water level is rising consistently.';
+  } else {
+    predictionConfidence = 'INSUFFICIENT_DATA';
+    predictionConfidenceLabel = 'Insufficient Data';
+    predictionLimitation =
+      'Short-term trend is noisy or inconsistent; prediction suppressed to avoid false alarms from ripples.';
+  }
 
   return {
     available: true,
@@ -658,6 +810,8 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     status,
     statusLabel: status,
     statusSource,
+    authoritativeArduino,
+    alertConfidenceNote,
     trend,
     trendLabel,
     trendDetail,
@@ -666,6 +820,9 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     rawDepthCm: latestPacket?.rawDepthCm ?? null,
     rawDistanceCm: latestPacket?.rawDistanceCm ?? null,
     rawReadingStatus,
+    suspiciousReading: Boolean(latestPacket?.isSuspicious),
+    suspiciousReason: latestPacket?.suspiciousReason || '',
+    recentSuspiciousCount,
     mountHeightCm,
     rateCmPerMin: enoughData && sensorQuality === 'GOOD' ? stats.slopeCmPerMin : null,
     rawSlopeCmPerMin: stats.slopeCmPerMin,
@@ -674,6 +831,9 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     residualStdCm: stats.residualStdCm,
     isReliableRise,
     isReliableFall,
+    predictionConfidence,
+    predictionConfidenceLabel,
+    predictionLimitation,
     etaWarning,
     etaCritical,
     filteredSamples: validFilteredSeries,

@@ -48,6 +48,21 @@ import {
 } from './arduinoSerial.js';
 import { fetchLiveNycWeather } from './nycWeather.js';
 import { evaluateFloodRiskIntelligence } from './riskIntelligence.js';
+import {
+  TestSessionRecorder,
+  formatClockTimer,
+  formatDurationSeconds
+} from './sessionRecorder.js';
+import {
+  createInitialFloatSwitchState,
+  recordFloatSwitchReading,
+  evaluateFloatAgreement
+} from './floatSensor.js';
+import {
+  createInitialValidationState,
+  addValidationComparison,
+  summarizeValidationResults
+} from './measurementValidation.js';
 import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
 (function () {
@@ -55,6 +70,8 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
   const PROTECTED_VIEWS = new Set(['dashboard']);
   const LAST_VIEW_KEY = 'nyc_floodguard_last_view_v2';
+  const FLOAT_CONFIG_KEY = 'nyc_floodguard_float_config_v1';
+  const VALIDATION_LOG_KEY = 'nyc_floodguard_ruler_validation_v1';
   const MAX_RAW_PACKETS = 60;
 
   /* --------------------------------------------------------------------------
@@ -82,6 +99,8 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     source: 'defaults', // 'defaults' | 'supabase'
     status: 'idle', // 'idle' | 'ok' | 'migration_required' | 'error'
     message: '',
+    legacyDeepBasinBlocked: false,
+    explicitAdminSave: false,
     values: { ...DEFAULT_PROTOTYPE_SETTINGS }
   };
 
@@ -142,6 +161,9 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
    */
   const telemetryState = {
     mode: 'UNAVAILABLE', // 'LIVE' | 'SIMULATED' | 'UNAVAILABLE'
+    streamHealth: 'IDLE', // 'IDLE' | 'OK' | 'STALE' | 'CONNECTION_LOST'
+    lastLivePacketMs: null,
+    suspiciousTotalCount: 0,
     connectionText: 'Connect your Arduino GIGA R1 WiFi over USB (115200 baud) for live street-model measurements, or launch Demo Mode for a guided walkthrough.',
     noticeText: '',
     noticeType: 'info', // 'info' | 'warn' | 'error' | 'success'
@@ -159,12 +181,89 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       barrierState: 'not_installed',
       lastPacketMs: null
     },
+    // Locked dry-road baseline calibration state (NEVER auto-overwritten during flooding)
+    calibration: {
+      status: 'UNSET', // 'UNSET' | 'CALIBRATING' | 'LOCKED_ARDUINO' | 'LOCKED_DRY_MEDIAN' | 'LOCKED_INFERRED' | 'DEMO'
+      baselineCm: null,
+      calibratedAtMs: null,
+      dryBuffer: [],
+      driftNote: ''
+    },
     // Guided 6-stage Demo Mode state (never mixed with LIVE hardware readings)
     simTimerId: null,
     demoStageIndex: 0,
     demoAutoAdvance: true,
     demoStageTickCount: 0,
     simCurrentDepthCm: 0.06
+  };
+
+  // Presentation Test Session Recorder
+  const sessionRecorder = new TestSessionRecorder();
+  const sessionUiState = {
+    showSummary: false,
+    timerId: null
+  };
+
+  // Independent Backup Float Sensor state (Liyafy XSL-3508-P — never alters ultrasonic alerts)
+  const floatSwitchState = createInitialFloatSwitchState();
+  try {
+    const savedFloatCfg = JSON.parse(localStorage.getItem(FLOAT_CONFIG_KEY) || 'null');
+    if (savedFloatCfg && typeof savedFloatCfg === 'object') {
+      const h = Number(savedFloatCfg.activationHeightCm);
+      if (Number.isFinite(h) && h > 0 && h <= 50) {
+        floatSwitchState.activationHeightCm = Number(h.toFixed(2));
+      }
+      if (typeof savedFloatCfg.closedMeansWater === 'boolean') {
+        floatSwitchState.closedMeansWater = savedFloatCfg.closedMeansWater;
+      }
+    }
+  } catch {
+    // Ignore localStorage parse errors
+  }
+
+  function persistFloatSwitchConfig() {
+    try {
+      localStorage.setItem(
+        FLOAT_CONFIG_KEY,
+        JSON.stringify({
+          activationHeightCm: floatSwitchState.activationHeightCm,
+          closedMeansWater: floatSwitchState.closedMeansWater
+        })
+      );
+    } catch {
+      // Ignore storage quota errors
+    }
+  }
+
+  // Independent Ruler vs. Ultrasonic Measurement Validation state
+  const validationState = createInitialValidationState();
+  try {
+    const savedVal = JSON.parse(localStorage.getItem(VALIDATION_LOG_KEY) || 'null');
+    if (savedVal && Array.isArray(savedVal.entries)) {
+      validationState.entries = savedVal.entries
+        .filter((e) => e && Number.isFinite(Number(e.rulerCm)) && Number.isFinite(Number(e.sensorCm)))
+        .slice(0, 100);
+    }
+  } catch {
+    // Ignore localStorage parse errors
+  }
+
+  function persistValidationLog() {
+    try {
+      localStorage.setItem(
+        VALIDATION_LOG_KEY,
+        JSON.stringify({ entries: validationState.entries.slice(0, 100) })
+      );
+    } catch {
+      // Ignore storage quota errors
+    }
+  }
+
+  // 9-Step Live Presentation Walkthrough state (auto-tracks LIVE Arduino milestones + manual checkboxes)
+  const walkthroughState = {
+    manualDone: new Set(),
+    autoDone: new Set(),
+    sawFloodInLive: false
   };
 
   /**
@@ -557,17 +656,39 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     authState.roleMessage = roleRes.errorMessage || '';
 
     if (settingsRes.status === 'ok' && settingsRes.settings) {
+      const incoming = settingsRes.settings;
+      const isLegacyDeepBasin =
+        Number(incoming.warnThresholdCm) >= 4.0 || Number(incoming.critThresholdCm) >= 5.0;
+
       prototypeSettingsState.source = 'supabase';
       prototypeSettingsState.status = 'ok';
       prototypeSettingsState.message = '';
-      prototypeSettingsState.values = {
-        ...DEFAULT_PROTOTYPE_SETTINGS,
-        ...settingsRes.settings
-      };
+      prototypeSettingsState.legacyDeepBasinBlocked = isLegacyDeepBasin;
+
+      if (isLegacyDeepBasin) {
+        // NEVER automatically switch to 5.00 / 12.00 cm (or 6.00 / 12.00 cm) deep-basin thresholds.
+        // Preserve experimental street-model thresholds: WARNING >= 0.50 cm, CRITICAL >= 1.25 cm.
+        prototypeSettingsState.values = {
+          ...DEFAULT_PROTOTYPE_SETTINGS,
+          ...incoming,
+          mountHeightCm:
+            Number(incoming.mountHeightCm) >= 24.0
+              ? PROTOTYPE_PRESETS.EXPERIMENTAL_STREET_MODEL.mountHeightCm
+              : incoming.mountHeightCm,
+          warnThresholdCm: PROTOTYPE_PRESETS.EXPERIMENTAL_STREET_MODEL.warnThresholdCm,
+          critThresholdCm: PROTOTYPE_PRESETS.EXPERIMENTAL_STREET_MODEL.critThresholdCm
+        };
+      } else {
+        prototypeSettingsState.values = {
+          ...DEFAULT_PROTOTYPE_SETTINGS,
+          ...incoming
+        };
+      }
     } else {
       prototypeSettingsState.source = 'defaults';
       prototypeSettingsState.status = settingsRes.status;
       prototypeSettingsState.message = settingsRes.errorMessage || '';
+      prototypeSettingsState.legacyDeepBasinBlocked = false;
       prototypeSettingsState.values = { ...DEFAULT_PROTOTYPE_SETTINGS };
     }
 
@@ -631,6 +752,10 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       } else if (prototypeSettingsState.status === 'error' && prototypeSettingsState.message) {
         statusNotice.textContent = prototypeSettingsState.message;
         statusNotice.className = 'inline-notice notice-warn';
+      } else if (prototypeSettingsState.legacyDeepBasinBlocked) {
+        statusNotice.textContent =
+          'Experimental street-model thresholds (WARNING ≥ 0.50 cm, CRITICAL ≥ 1.25 cm) are preserved. Legacy deep-basin thresholds in Supabase were not auto-applied.';
+        statusNotice.className = 'inline-notice notice-info';
       } else if (prototypeSettingsState.source === 'supabase' && cfg.updatedAt) {
         statusNotice.textContent = `Loaded from Supabase monitoring_settings (last updated ${new Date(cfg.updatedAt).toLocaleString()}).`;
         statusNotice.className = 'inline-notice notice-success';
@@ -668,6 +793,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
   function pushTelemetrySample({
     distanceCm = null,
     mountHeightCm = null,
+    reportedDepthCm = null,
     timestampMs = Date.now(),
     errorCode = null,
     firmwareQuality = null,
@@ -684,6 +810,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       timestampMs: timestampMs || Date.now(),
       distanceCm: Number.isFinite(distanceCm) ? Number(distanceCm.toFixed(2)) : null,
       mountHeightCm: Number(mount.toFixed(2)),
+      reportedDepthCm: Number.isFinite(reportedDepthCm) ? Number(reportedDepthCm.toFixed(2)) : null,
       errorCode: errorCode || null,
       firmwareQuality: firmwareQuality || null,
       burstSpreadCm: Number.isFinite(burstSpreadCm) ? Number(burstSpreadCm.toFixed(2)) : null,
@@ -696,7 +823,38 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       telemetryState.samples = telemetryState.samples.slice(-MAX_RAW_PACKETS);
     }
 
-    recalculateTelemetryAndRender();
+    recalculateTelemetryAndRender(true);
+  }
+
+  function appendSystemAlertEvent(nextStatus, noteText = '') {
+    const nowMs = Date.now();
+    const prevStatus = telemetryState.lastAlertStatus || 'LIVE';
+    telemetryState.lastAlertStatus = nextStatus;
+
+    telemetryState.alertHistory.unshift({
+      timestampMs: nowMs,
+      sourceMode: telemetryState.mode === 'SIMULATED' ? 'DEMO' : 'LIVE',
+      prevStatus,
+      nextStatus,
+      depthCm: null,
+      distanceCm: null,
+      note: noteText
+    });
+
+    if (telemetryState.alertHistory.length > MAX_ALERT_HISTORY) {
+      telemetryState.alertHistory = telemetryState.alertHistory.slice(0, MAX_ALERT_HISTORY);
+    }
+
+    if (sessionRecorder.recording) {
+      sessionRecorder.recordEvent({
+        timestampMs: nowMs,
+        eventType: nextStatus === 'RECALIBRATED' ? 'RECALIBRATION' : 'STATUS_CHANGE',
+        fromStatus: prevStatus,
+        toStatus: nextStatus,
+        depthCm: null,
+        note: noteText
+      });
+    }
   }
 
   function recordStatusTransitionIfNeeded(analysis) {
@@ -736,7 +894,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     }
   }
 
-  function recalculateTelemetryAndRender() {
+  function recalculateTelemetryAndRender(fromNewSample = false) {
     const activeSettings = getEffectiveThresholds();
     const analysis = analyzeWaterTelemetry(
       telemetryState.samples,
@@ -744,7 +902,29 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       telemetryState.mode
     );
     telemetryState.latestAnalysis = analysis;
+
+    if (fromNewSample && analysis.suspiciousReading) {
+      telemetryState.suspiciousTotalCount += 1;
+    }
+
     recordStatusTransitionIfNeeded(analysis);
+
+    if (fromNewSample && sessionRecorder.recording && telemetryState.mode !== 'UNAVAILABLE') {
+      sessionRecorder.recordSample({
+        timestampMs: analysis.lastUpdatedMs || Date.now(),
+        sourceMode: telemetryState.mode === 'LIVE' ? 'LIVE' : 'DEMO',
+        status: analysis.status,
+        depthCm: analysis.filteredDepthCm,
+        distanceCm: analysis.filteredDistanceCm ?? analysis.rawDistanceCm,
+        baselineCm: telemetryState.calibration.baselineCm ?? analysis.mountHeightCm,
+        trend: analysis.trend,
+        rateCmPerMin: analysis.rateCmPerMin,
+        sensorQuality: analysis.sensorQuality,
+        suspicious: Boolean(analysis.suspiciousReading),
+        suspiciousReason: analysis.suspiciousReason || '',
+        rawLine: telemetryState.latestHardware.lastRawLine || ''
+      });
+    }
 
     telemetryState.latestRiskIntel = evaluateFloodRiskIntelligence({
       analysis,
@@ -758,76 +938,193 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
   /**
    * Returns active threshold configuration.
-   * For DEMO MODE or tested text-format Arduino packets (which use the 14.39 cm dry baseline
-   * and 0.50 / 1.25 cm experimental thresholds), uses experimental street thresholds unless
-   * an Admin explicitly configured street-scale thresholds in Supabase.
+   * Preserves experimental street-model thresholds (WARNING >= 0.50 cm, CRITICAL >= 1.25 cm)
+   * and NEVER automatically switches to deep-basin (5.00 / 12.00 cm or 6.00 / 12.00 cm) thresholds.
    */
   function getEffectiveThresholds() {
     const base = { ...prototypeSettingsState.values };
     if (
-      telemetryState.mode === 'SIMULATED' &&
-      base.critThresholdCm > 5.0
+      !prototypeSettingsState.explicitAdminSave &&
+      (Number(base.warnThresholdCm) >= 4.0 || Number(base.critThresholdCm) >= 5.0)
     ) {
       return {
         ...base,
-        ...PROTOTYPE_PRESETS.EXPERIMENTAL_STREET_MODEL
-      };
-    }
-    if (
-      telemetryState.mode === 'LIVE' &&
-      telemetryState.latestHardware.format === 'text' &&
-      base.critThresholdCm > 5.0
-    ) {
-      return {
-        ...base,
-        ...PROTOTYPE_PRESETS.EXPERIMENTAL_STREET_MODEL
+        warnThresholdCm: PROTOTYPE_PRESETS.EXPERIMENTAL_STREET_MODEL.warnThresholdCm,
+        critThresholdCm: PROTOTYPE_PRESETS.EXPERIMENTAL_STREET_MODEL.critThresholdCm
       };
     }
     return base;
   }
 
+  function resetCalibrationState(status = 'UNSET') {
+    telemetryState.calibration = {
+      status,
+      baselineCm: null,
+      calibratedAtMs: null,
+      dryBuffer: [],
+      driftNote: ''
+    };
+  }
+
+  function closeRecalibratePanel() {
+    const strip = document.getElementById('recalibrateConfirmStrip');
+    const chk = document.getElementById('chkConfirmDryRoad');
+    const confirmBtn = document.getElementById('btnConfirmRecalibrate');
+    if (strip) strip.classList.add('hidden');
+    if (chk) chk.checked = false;
+    if (confirmBtn) confirmBtn.disabled = true;
+  }
+
+  function medianNumeric(arr) {
+    if (!arr || arr.length === 0) return null;
+    const sorted = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
   // Real USB Web Serial Client for Arduino GIGA R1 WiFi (115200 baud)
   const arduinoClient = new ArduinoSerialClient({
     baudRate: 115200,
-    onStatusChange(status, msg) {
+    onStatusChange(status, msg, meta = {}) {
       if (status === 'connecting') {
         setDashboardNotice(msg, 'info');
       } else if (status === 'connected') {
         // Strictly separate LIVE Arduino from DEMO MODE
         stopSimulationBackup(false);
+        closeRecalibratePanel();
         telemetryState.mode = 'UNAVAILABLE'; // Stays UNAVAILABLE until first valid serial line arrives
+        telemetryState.streamHealth = 'IDLE';
         telemetryState.samples = [];
         telemetryState.lastAlertStatus = null;
+        telemetryState.suspiciousTotalCount = 0;
+        resetCalibrationState('UNSET');
         telemetryState.connectionText = msg;
         telemetryState.latestHardware.lastPacketMs = null;
         telemetryState.latestHardware.lastRawLine = '';
         telemetryState.latestHardware.format = null;
+        floatSwitchState.state = null;
+        floatSwitchState.lastUpdatedMs = null;
         setDashboardNotice(msg, 'info');
-        recalculateTelemetryAndRender();
+        recalculateTelemetryAndRender(false);
       } else if (status === 'disconnected') {
+        closeRecalibratePanel();
+        const wasLiveOrUnexpected =
+          telemetryState.mode === 'LIVE' ||
+          meta.reason === 'unplugged' ||
+          (meta.reason === 'error' && telemetryState.lastLivePacketMs != null);
+
         if (telemetryState.mode === 'LIVE' || !telemetryState.simTimerId) {
           telemetryState.mode = 'UNAVAILABLE';
-          telemetryState.connectionText = msg || 'Arduino USB disconnected';
-          telemetryState.lastAlertStatus = null;
+          telemetryState.samples = []; // Never display stale readings as if they are live
+          telemetryState.streamHealth =
+            meta.reason === 'unplugged' || (wasLiveOrUnexpected && meta.reason !== 'manual')
+              ? 'CONNECTION_LOST'
+              : 'IDLE';
+          telemetryState.connectionText =
+            telemetryState.streamHealth === 'CONNECTION_LOST'
+              ? msg || 'Arduino USB connection lost — live readings paused'
+              : msg || 'Arduino USB disconnected';
+
+          if (telemetryState.streamHealth === 'CONNECTION_LOST') {
+            appendSystemAlertEvent('CONNECTION_LOST', msg || 'Arduino USB disconnected unexpectedly');
+          } else {
+            telemetryState.lastAlertStatus = null;
+          }
+
+          resetCalibrationState('UNSET');
           telemetryState.latestHardware.floatLow = null;
           telemetryState.latestHardware.floatHigh = null;
           telemetryState.latestHardware.barrierState = 'not_installed';
           telemetryState.latestHardware.lastPacketMs = null;
           telemetryState.latestHardware.format = null;
+          floatSwitchState.state = null;
+          floatSwitchState.lastUpdatedMs = null;
         }
-        setDashboardNotice(msg || 'Arduino USB disconnected.', 'info');
-        recalculateTelemetryAndRender();
+        setDashboardNotice(
+          msg || 'Arduino USB disconnected.',
+          telemetryState.streamHealth === 'CONNECTION_LOST' ? 'error' : 'info'
+        );
+        recalculateTelemetryAndRender(false);
       }
     },
     onReading(packet) {
       if (telemetryState.simTimerId) {
         stopSimulationBackup(false);
       }
+
+      // 1. Handle standalone Backup Float Sensor lines ("Float Switch: OPEN" / "Float Switch: CLOSED")
+      // Completely independent from ultrasonic telemetry — NEVER disrupts ultrasonic depth or triggers CRITICAL.
+      if (packet.format === 'float_switch') {
+        telemetryState.latestHardware.lastPacketMs = packet.receivedAtMs;
+        telemetryState.lastLivePacketMs = packet.receivedAtMs;
+        if (telemetryState.mode === 'LIVE') {
+          telemetryState.streamHealth = 'OK';
+        }
+        const currentUltrasonicDepth =
+          telemetryState.mode === 'LIVE' &&
+          telemetryState.latestAnalysis?.available &&
+          telemetryState.latestAnalysis?.filteredDepthCm != null
+            ? telemetryState.latestAnalysis.filteredDepthCm
+            : null;
+        recordFloatSwitchReading(floatSwitchState, packet.floatSwitchState, {
+          timestampMs: packet.receivedAtMs,
+          rawLine: packet.rawLine,
+          ultrasonicDepthCm: currentUltrasonicDepth
+        });
+        renderBackupFloatPanel();
+        renderDashboard();
+        return;
+      }
+
+      // 2. Handle explicit Arduino calibration status lines (boot or after 'c' command)
+      if (packet.format === 'calibration') {
+        telemetryState.latestHardware.lastRawLine = packet.rawLine || '';
+        telemetryState.latestHardware.lastPacketMs = packet.receivedAtMs;
+        telemetryState.lastLivePacketMs = packet.receivedAtMs;
+        telemetryState.streamHealth = 'OK';
+
+        if (packet.calibrationState === 'calibrating') {
+          telemetryState.calibration.status = 'CALIBRATING';
+          telemetryState.calibration.dryBuffer = [];
+          telemetryState.calibration.driftNote = '';
+          setDashboardNotice('Arduino is recalibrating dry-road baseline… Keep roadway dry.', 'info');
+        } else if (Number.isFinite(packet.baselineCm)) {
+          telemetryState.calibration.status = 'LOCKED_ARDUINO';
+          telemetryState.calibration.baselineCm = packet.baselineCm;
+          telemetryState.calibration.calibratedAtMs = packet.receivedAtMs;
+          telemetryState.calibration.dryBuffer = [];
+          telemetryState.calibration.driftNote = '';
+          setDashboardNotice(
+            `Dry-road baseline calibrated and locked at ${packet.baselineCm.toFixed(2)} cm by Arduino.`,
+            'success'
+          );
+          appendSystemAlertEvent('RECALIBRATED', `Locked dry baseline at ${packet.baselineCm.toFixed(2)} cm`);
+          showToast(`Arduino dry baseline locked at ${packet.baselineCm.toFixed(2)} cm.`, 'NORMAL');
+        }
+        renderDashboard();
+        return;
+      }
+
+      // If an ultrasonic packet also carries an inline Float Switch state, update backup float independently
+      if (packet.floatSwitchState) {
+        recordFloatSwitchReading(floatSwitchState, packet.floatSwitchState, {
+          timestampMs: packet.receivedAtMs,
+          rawLine: `Float Switch: ${packet.floatSwitchState}`,
+          ultrasonicDepthCm: Number.isFinite(packet.reportedDepthCm) ? packet.reportedDepthCm : null
+        });
+      }
+
       const switchedToLive = telemetryState.mode !== 'LIVE';
       telemetryState.mode = 'LIVE';
+      telemetryState.streamHealth = 'OK';
+      telemetryState.lastLivePacketMs = packet.receivedAtMs;
       if (switchedToLive) {
         telemetryState.samples = [];
-        telemetryState.lastAlertStatus = null;
+        if (telemetryState.lastAlertStatus === 'CONNECTION_LOST' || telemetryState.lastAlertStatus === 'STALE_DATA') {
+          // Keep transition chain visible when recovering from connection loss / stale data
+        } else {
+          telemetryState.lastAlertStatus = null;
+        }
       }
 
       telemetryState.latestHardware = {
@@ -839,14 +1136,79 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         barrierState: packet.barrierState || 'not_installed',
         lastPacketMs: packet.receivedAtMs
       };
-      telemetryState.connectionText = `${packet.device} · USB Serial 115200 baud (${packet.format === 'text' ? 'Calibrated Text Stream' : 'JSON Stream'}) · Last packet ${new Date(packet.receivedAtMs).toLocaleTimeString()}`;
+      telemetryState.connectionText = `${packet.device} · USB Serial 115200 baud (${packet.format === 'text' ? 'Authoritative Text Stream' : 'JSON Stream'}) · Last packet ${new Date(packet.receivedAtMs).toLocaleTimeString()}`;
       setDashboardNotice('', 'info');
 
-      // For Arduino auto-calibrated text lines ("Distance: 14.39 cm | Water Depth: 0.00 cm | Status: NORMAL"),
-      // always respect the sensor's dry-road calibration baseline (distance + depth = mountHeightCm).
+      // 2. Stable Baseline Lock Logic (NEVER auto-overwrite during flooding or clamped-zero noise!)
+      const activeThresh = getEffectiveThresholds();
+      const isFloodingNow =
+        (Number.isFinite(packet.reportedDepthCm) && packet.reportedDepthCm >= activeThresh.warnThresholdCm) ||
+        packet.reportedStatus === 'WARNING' ||
+        packet.reportedStatus === 'CRITICAL';
+
+      const cal = telemetryState.calibration;
+
+      if (packet.format === 'text') {
+        const isLocked =
+          cal.baselineCm != null &&
+          (cal.status === 'LOCKED_ARDUINO' ||
+            cal.status === 'LOCKED_DRY_MEDIAN' ||
+            cal.status === 'LOCKED_INFERRED');
+
+        if (!isLocked) {
+          // Case A: Unclamped positive reading while not flooding -> exact Arduino internal baseline
+          if (Number.isFinite(packet.inferredBaselineCm) && !isFloodingNow) {
+            cal.baselineCm = packet.inferredBaselineCm;
+            cal.status = 'LOCKED_INFERRED';
+            cal.calibratedAtMs = packet.receivedAtMs;
+            cal.dryBuffer = [];
+            cal.driftNote = '';
+          } else if (
+            !packet.errorCode &&
+            packet.reportedDepthCm === 0 &&
+            (packet.reportedStatus === 'NORMAL' || !packet.reportedStatus) &&
+            Number.isFinite(packet.distanceCm) &&
+            packet.distanceCm >= 4.0 &&
+            packet.distanceCm <= 35.0
+          ) {
+            // Case B: Dry roadway (Depth = 0.00 cm) -> lock median of first 3 dry readings
+            // so a single noisy ultrasonic bounce (e.g. 15.78 cm) never sets the baseline!
+            cal.dryBuffer.push(packet.distanceCm);
+            if (cal.dryBuffer.length >= 3) {
+              const med = medianNumeric(cal.dryBuffer.slice(-3));
+              cal.baselineCm = Number(med.toFixed(2));
+              cal.status = 'LOCKED_DRY_MEDIAN';
+              cal.calibratedAtMs = packet.receivedAtMs;
+              cal.driftNote = '';
+            }
+          } else if (Number.isFinite(packet.inferredBaselineCm) && cal.baselineCm == null) {
+            // Connected mid-flood before seeing dry road: lock once from first unclamped packet,
+            // and NEVER update again during flooding.
+            cal.baselineCm = packet.inferredBaselineCm;
+            cal.status = 'LOCKED_INFERRED';
+            cal.calibratedAtMs = packet.receivedAtMs;
+            cal.driftNote = 'Connected during active water — recalibrate with "c" once roadway is dry.';
+          }
+        } else {
+          // Baseline is ALREADY LOCKED: NEVER overwrite during flooding or dry scatter!
+          // If an unclamped reading differs from the locked baseline by > 0.75 cm, surface a warning only.
+          if (Number.isFinite(packet.inferredBaselineCm)) {
+            const diff = Math.abs(packet.inferredBaselineCm - cal.baselineCm);
+            if (diff > 0.75) {
+              cal.driftNote = `Arduino distance+depth (${packet.inferredBaselineCm.toFixed(2)} cm) differs from locked baseline (${cal.baselineCm.toFixed(2)} cm) — verify riser or recalibrate when dry.`;
+            } else {
+              cal.driftNote = '';
+            }
+          }
+        }
+      }
+
       let mountHeightCm;
-      if (packet.format === 'text' && Number.isFinite(packet.mountHeightCm)) {
-        mountHeightCm = packet.mountHeightCm;
+      if (packet.format === 'text') {
+        mountHeightCm =
+          cal.baselineCm ??
+          (cal.dryBuffer.length > 0 ? Number(medianNumeric(cal.dryBuffer).toFixed(2)) : null) ??
+          prototypeSettingsState.values.mountHeightCm;
       } else if (prototypeSettingsState.source === 'supabase') {
         mountHeightCm = prototypeSettingsState.values.mountHeightCm;
       } else {
@@ -861,6 +1223,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       pushTelemetrySample({
         distanceCm,
         mountHeightCm,
+        reportedDepthCm: packet.reportedDepthCm,
         timestampMs: packet.receivedAtMs,
         errorCode: packet.errorCode,
         firmwareQuality: packet.firmwareQuality,
@@ -913,6 +1276,15 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
     stopSimulationBackup(false);
     telemetryState.mode = 'SIMULATED';
+    telemetryState.streamHealth = 'OK';
+    telemetryState.suspiciousTotalCount = 0;
+    telemetryState.calibration = {
+      status: 'DEMO',
+      baselineCm: PROTOTYPE_PRESETS.EXPERIMENTAL_STREET_MODEL.mountHeightCm,
+      calibratedAtMs: Date.now(),
+      dryBuffer: [],
+      driftNote: ''
+    };
     telemetryState.demoStageIndex = 0;
     telemetryState.demoAutoAdvance = true;
     telemetryState.demoStageTickCount = 0;
@@ -974,6 +1346,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       pushTelemetrySample({
         distanceCm: simulatedDistance,
         mountHeightCm: mount,
+        reportedDepthCm: simulatedDepth,
         timestampMs: Date.now(),
         format: 'demo'
       });
@@ -1000,8 +1373,10 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     }
     if (resetToUnavailable && telemetryState.mode === 'SIMULATED') {
       telemetryState.mode = 'UNAVAILABLE';
+      telemetryState.streamHealth = 'IDLE';
       telemetryState.samples = [];
       telemetryState.lastAlertStatus = null;
+      resetCalibrationState('UNSET');
       telemetryState.connectionText =
         'Demo Mode stopped · Connect Arduino GIGA R1 WiFi over USB or launch Demo Mode.';
       telemetryState.latestHardware.floatLow = null;
@@ -1009,26 +1384,32 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       telemetryState.latestHardware.lastPacketMs = null;
       telemetryState.latestHardware.lastRawLine = '';
       setDashboardNotice('', 'info');
-      recalculateTelemetryAndRender();
+      recalculateTelemetryAndRender(false);
     }
   }
 
   function startLiveStaleWatchdog() {
     if (staleWatchTimerId) clearInterval(staleWatchTimerId);
+    const STALE_TIMEOUT_MS = 6000; // Flag stale data promptly (>6s without a reading)
     staleWatchTimerId = setInterval(() => {
       if (telemetryState.mode === 'LIVE' && telemetryState.latestHardware.lastPacketMs) {
         const elapsed = Date.now() - telemetryState.latestHardware.lastPacketMs;
-        if (elapsed > prototypeSettingsState.values.staleTimeoutMs) {
+        if (elapsed > STALE_TIMEOUT_MS) {
+          const secs = Math.round(elapsed / 1000);
           telemetryState.mode = 'UNAVAILABLE';
-          telemetryState.connectionText = 'Arduino USB connected, but no sensor readings received recently';
+          telemetryState.streamHealth = 'STALE';
+          telemetryState.samples = []; // Clear live buffer so stale readings are NEVER shown as live
+          telemetryState.connectionText = `Stale Data Warning: No Arduino readings received for ${secs}s (last packet ${new Date(telemetryState.latestHardware.lastPacketMs).toLocaleTimeString()}).`;
+          appendSystemAlertEvent('STALE_DATA', `No Arduino serial packets received for ${secs}s`);
           setDashboardNotice(
-            'Live Arduino readings timed out (>10 seconds since last valid serial line). Check HC-SR04 wiring and Serial output.',
+            `Stale Data Warning — Arduino readings stopped arriving (${secs}s elapsed). Live depth paused until fresh serial packets arrive.`,
             'warn'
           );
-          recalculateTelemetryAndRender();
+          showToast('Stale Data Warning: Arduino readings stopped arriving.', 'WARNING');
+          recalculateTelemetryAndRender(false);
         }
       }
-    }, 2000);
+    }, 1000);
   }
 
   /* --------------------------------------------------------------------------
@@ -1040,15 +1421,20 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       telemetryState.latestAnalysis ||
       analyzeWaterTelemetry(telemetryState.samples, cfg, telemetryState.mode);
 
-    // 1. Source indicator, Sensor Quality, Timestamp & Connection Controls
+    // 1. Source indicator, Sensor Quality, Calibration Status, Timestamp & Connection Controls
     const sourceBadge = document.getElementById('dashSourceBadge');
     const qualityBadge = document.getElementById('dashQualityBadge');
+    const calibBadge = document.getElementById('dashCalibrationBadge');
     const lastTsEl = document.getElementById('dashLastTimestamp');
     const sourceDetail = document.getElementById('dashSourceDetail');
     const btnConnect = document.getElementById('btnConnectArduino');
+    const btnRecalib = document.getElementById('btnOpenRecalibrate');
     const btnDisconnect = document.getElementById('btnDisconnectArduino');
     const btnSimToggle = document.getElementById('btnToggleSimBackup');
     const simStrip = document.getElementById('simControlStrip');
+
+    const isConnLost = telemetryState.streamHealth === 'CONNECTION_LOST';
+    const isStale = telemetryState.streamHealth === 'STALE';
 
     if (sourceBadge) {
       if (telemetryState.mode === 'LIVE') {
@@ -1057,6 +1443,12 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       } else if (telemetryState.mode === 'SIMULATED') {
         sourceBadge.textContent = 'DEMO MODE · SIMULATED';
         sourceBadge.className = 'source-indicator source-simulated';
+      } else if (isConnLost) {
+        sourceBadge.textContent = 'CONNECTION LOST';
+        sourceBadge.className = 'source-indicator source-disconnected';
+      } else if (isStale) {
+        sourceBadge.textContent = 'STALE DATA · NO SIGNAL';
+        sourceBadge.className = 'source-indicator source-stale';
       } else if (arduinoClient.connected) {
         sourceBadge.textContent = 'USB CONNECTED · WAITING';
         sourceBadge.className = 'source-indicator source-unavailable';
@@ -1080,8 +1472,50 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       }
     }
 
+    const cal = telemetryState.calibration;
+    let calibStatusShort = 'Not Connected';
+    let calibStatusLong = 'Not connected';
+    let calibCls = 'quality-text-unavailable';
+    if (telemetryState.mode === 'SIMULATED') {
+      calibStatusShort = `Demo (${Number(cal.baselineCm || 14.39).toFixed(2)} cm)`;
+      calibStatusLong = `Demo baseline (${Number(cal.baselineCm || 14.39).toFixed(2)} cm)`;
+      calibCls = 'quality-text-good';
+    } else if (cal.status === 'CALIBRATING') {
+      calibStatusShort = 'Recalibrating…';
+      calibStatusLong = 'Recalibrating dry-road baseline ("c" sent)…';
+      calibCls = 'quality-text-unstable';
+    } else if (cal.status === 'LOCKED_ARDUINO' && cal.baselineCm != null) {
+      calibStatusShort = `Locked (${cal.baselineCm.toFixed(2)} cm)`;
+      calibStatusLong = `Calibrated & locked by Arduino (${cal.baselineCm.toFixed(2)} cm)`;
+      calibCls = cal.driftNote ? 'quality-text-unstable' : 'quality-text-good';
+    } else if (cal.status === 'LOCKED_DRY_MEDIAN' && cal.baselineCm != null) {
+      calibStatusShort = `Locked Dry (${cal.baselineCm.toFixed(2)} cm)`;
+      calibStatusLong = `Locked from dry-road median (${cal.baselineCm.toFixed(2)} cm)`;
+      calibCls = cal.driftNote ? 'quality-text-unstable' : 'quality-text-good';
+    } else if (cal.status === 'LOCKED_INFERRED' && cal.baselineCm != null) {
+      calibStatusShort = `Locked (${cal.baselineCm.toFixed(2)} cm)`;
+      calibStatusLong = `Locked from Arduino telemetry (${cal.baselineCm.toFixed(2)} cm)`;
+      calibCls = cal.driftNote ? 'quality-text-unstable' : 'quality-text-good';
+    } else if (arduinoClient.connected && cal.dryBuffer.length > 0) {
+      calibStatusShort = `Locking dry (${cal.dryBuffer.length}/3)…`;
+      calibStatusLong = `Collecting dry-road reference (${cal.dryBuffer.length}/3 readings)…`;
+      calibCls = 'quality-text-unstable';
+    } else if (arduinoClient.connected) {
+      calibStatusShort = 'Awaiting dry reading';
+      calibStatusLong = 'Connected — awaiting dry reading or manual "c" calibration';
+      calibCls = 'quality-text-unavailable';
+    }
+
+    if (calibBadge) {
+      calibBadge.textContent = `Calibration: ${calibStatusShort}`;
+      calibBadge.className = `meta-status-text ${calibCls}`;
+      calibBadge.title = cal.driftNote || calibStatusLong;
+    }
+
     const lastReadingTimeStr = analysis.lastUpdatedMs
       ? new Date(analysis.lastUpdatedMs).toLocaleTimeString()
+      : telemetryState.lastLivePacketMs && (isConnLost || isStale)
+      ? `${new Date(telemetryState.lastLivePacketMs).toLocaleTimeString()} (stale)`
       : '--';
     if (lastTsEl) {
       lastTsEl.textContent = `Last reading: ${lastReadingTimeStr}`;
@@ -1092,6 +1526,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     }
 
     if (btnConnect) btnConnect.classList.toggle('hidden', arduinoClient.connected);
+    if (btnRecalib) btnRecalib.classList.toggle('hidden', !arduinoClient.connected);
     if (btnDisconnect) btnDisconnect.classList.toggle('hidden', !arduinoClient.connected);
 
     if (btnSimToggle) {
@@ -1105,28 +1540,52 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       if (telemetryState.mode === 'SIMULATED') renderDemoStageBar();
     }
 
-    // 2. Active Flood Warning / Critical Banner
+    // 2. Active Flood / Connection Lost / Stale Data Banner
     const alertBanner = document.getElementById('dashAlertBanner');
     const alertTitle = document.getElementById('dashAlertBannerTitle');
     const alertBody = document.getElementById('dashAlertBannerBody');
     const alertTime = document.getElementById('dashAlertBannerTime');
     if (alertBanner && alertTitle && alertBody && alertTime) {
-      if (analysis.status === 'CRITICAL') {
+      if (isConnLost) {
+        alertBanner.className = 'alert-banner alert-banner-critical';
+        alertTitle.textContent = 'ARDUINO DISCONNECTED — CONNECTION LOST';
+        alertBody.textContent =
+          'USB serial link to the Arduino GIGA R1 WiFi was lost. Live depth readouts have been cleared so stale values are not shown as live. Reconnect USB to resume.';
+        alertTime.textContent = telemetryState.lastLivePacketMs
+          ? `Last: ${new Date(telemetryState.lastLivePacketMs).toLocaleTimeString()}`
+          : '--:--:--';
+      } else if (isStale) {
+        alertBanner.className = 'alert-banner alert-banner-warning';
+        alertTitle.textContent = 'STALE DATA WARNING — NO ARDUINO READINGS';
+        alertBody.textContent =
+          'No new serial packets have arrived from the Arduino for over 6 seconds. Live display is paused until fresh readings resume.';
+        alertTime.textContent = telemetryState.lastLivePacketMs
+          ? `Last: ${new Date(telemetryState.lastLivePacketMs).toLocaleTimeString()}`
+          : '--:--:--';
+      } else if (analysis.status === 'CRITICAL') {
         alertBanner.className = 'alert-banner alert-banner-critical';
         alertTitle.textContent = `${telemetryState.mode === 'SIMULATED' ? '[DEMO] ' : ''}CRITICAL FLOOD ALERT`;
-        alertBody.textContent = `Water depth is ${analysis.filteredDepthCm.toFixed(2)} cm (≥ ${cfg.critThresholdCm.toFixed(2)} cm Critical threshold). ${analysis.trendLabel}. Inspect storm drain and avoid standing street water.`;
+        const trendNote =
+          analysis.trend === 'UNCERTAIN'
+            ? 'Short-term trend is uncertain, but CRITICAL flood status is confirmed.'
+            : `${analysis.trendLabel}.`;
+        alertBody.textContent = `Water depth is ${analysis.filteredDepthCm.toFixed(2)} cm (≥ ${cfg.critThresholdCm.toFixed(2)} cm Critical threshold). ${trendNote} Inspect storm drain blockage.`;
         alertTime.textContent = lastReadingTimeStr;
       } else if (analysis.status === 'WARNING') {
         alertBanner.className = 'alert-banner alert-banner-warning';
         alertTitle.textContent = `${telemetryState.mode === 'SIMULATED' ? '[DEMO] ' : ''}FLOOD WARNING ACTIVE`;
-        alertBody.textContent = `Water depth is ${analysis.filteredDepthCm.toFixed(2)} cm (Warning range ${cfg.warnThresholdCm.toFixed(2)}–${(cfg.critThresholdCm - 0.01).toFixed(2)} cm). ${analysis.trendLabel}.`;
+        const trendNote =
+          analysis.trend === 'UNCERTAIN'
+            ? 'Short-term trend is uncertain, but WARNING flood status is confirmed.'
+            : `${analysis.trendLabel}.`;
+        alertBody.textContent = `Water depth is ${analysis.filteredDepthCm.toFixed(2)} cm (Warning range ${cfg.warnThresholdCm.toFixed(2)}–${(cfg.critThresholdCm - 0.01).toFixed(2)} cm). ${trendNote}`;
         alertTime.textContent = lastReadingTimeStr;
       } else {
         alertBanner.className = 'alert-banner hidden';
       }
     }
 
-    // 3. Flood status card (Green NORMAL, Amber WARNING, Red CRITICAL)
+    // 3. Flood status card (Green NORMAL, Amber WARNING, Red CRITICAL, plus Connection Lost / Stale)
     const statusCard = document.getElementById('cardFloodStatus');
     const statusVal = document.getElementById('dashStatusValue');
     const statusMeta = document.getElementById('dashStatusMeta');
@@ -1138,7 +1597,13 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
     if (statusCard && statusVal) {
       statusCard.className = 'metric-card';
-      if (analysis.status === 'NORMAL') {
+      if (isConnLost) {
+        statusCard.classList.add('status-card-critical');
+        statusVal.textContent = 'CONNECTION LOST';
+      } else if (isStale) {
+        statusCard.classList.add('status-card-warning');
+        statusVal.textContent = 'STALE DATA';
+      } else if (analysis.status === 'NORMAL') {
         statusCard.classList.add('status-card-normal');
         statusVal.textContent = 'NORMAL';
       } else if (analysis.status === 'WARNING') {
@@ -1157,11 +1622,15 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     }
 
     if (statusMeta) {
-      if (analysis.status === 'OUT_OF_RANGE') {
+      if (isConnLost) {
+        statusMeta.textContent = 'Arduino USB disconnected — reconnect port to resume live monitoring.';
+      } else if (isStale) {
+        statusMeta.textContent = 'No recent packets (>6s) — stale readings are never displayed as live.';
+      } else if (analysis.status === 'OUT_OF_RANGE') {
         statusMeta.textContent =
           analysis.sensorQualityReason || 'Ultrasonic echoes out of range — not interpreted as 0.00 cm';
       } else if (analysis.statusSource === 'arduino_confirmed') {
-        statusMeta.textContent = `Arduino 3-reading confirmed · Warn ≥ ${Number(cfg.warnThresholdCm).toFixed(2)} cm · Crit ≥ ${Number(cfg.critThresholdCm).toFixed(2)} cm`;
+        statusMeta.textContent = `Authoritative Arduino status (3-reading confirmed) · Warn ≥ ${Number(cfg.warnThresholdCm).toFixed(2)} cm · Crit ≥ ${Number(cfg.critThresholdCm).toFixed(2)} cm`;
       } else {
         statusMeta.innerHTML =
           `Normal &lt; <span id="dashWarnValLabel">${Number(cfg.warnThresholdCm).toFixed(2)}</span> cm &middot; ` +
@@ -1170,7 +1639,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       }
     }
 
-    // 4. Live Water Depth Hero Display (cm)
+    // 4. Live Water Depth Hero Display (cm) — Clearly separating Locked Baseline vs Current Distance
     const depthEl = document.getElementById('dashDepthCm');
     const depthFormulaEl = document.getElementById('dashDepthFormula');
     const rawLineEl = document.getElementById('dashRawReadingLine');
@@ -1184,17 +1653,20 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
     if (depthFormulaEl) {
       if (analysis.available && analysis.filteredDistanceCm != null && analysis.filteredDepthCm != null) {
-        const mountStr = analysis.mountHeightCm.toFixed(2);
-        const fDistStr = analysis.filteredDistanceCm.toFixed(2);
-        const fDepthStr = analysis.filteredDepthCm.toFixed(2);
-        depthFormulaEl.textContent =
-          analysis.filteredDistanceCm > analysis.mountHeightCm
-            ? `Baseline ${mountStr} − Dist ${fDistStr} = 0.00 cm (dry street)`
-            : `Baseline ${mountStr} − Dist ${fDistStr} = ${fDepthStr} cm`;
+        const baselineVal = cal.baselineCm ?? analysis.mountHeightCm;
+        const baselineTag =
+          cal.status === 'LOCKED_ARDUINO' || cal.status === 'LOCKED_DRY_MEDIAN' || cal.status === 'LOCKED_INFERRED'
+            ? `Locked Baseline: ${Number(baselineVal).toFixed(2)} cm`
+            : `Baseline Ref: ${Number(baselineVal).toFixed(2)} cm`;
+        depthFormulaEl.textContent = `${baselineTag} · Current Distance: ${analysis.filteredDistanceCm.toFixed(2)} cm`;
+      } else if (isConnLost) {
+        depthFormulaEl.textContent = 'Connection Lost — live depth cleared';
+      } else if (isStale) {
+        depthFormulaEl.textContent = 'Stale Data — awaiting fresh Arduino reading';
       } else if (analysis.status === 'OUT_OF_RANGE') {
-        depthFormulaEl.textContent = 'Invalid distance — not shown as 0.00 cm';
+        depthFormulaEl.textContent = 'Invalid ultrasonic distance — not shown as 0.00 cm';
       } else {
-        depthFormulaEl.textContent = 'Depth = Dry Baseline − Sensor Distance';
+        depthFormulaEl.textContent = 'Calibrated Baseline: -- · Current Distance: --';
       }
     }
 
@@ -1204,29 +1676,38 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         rawLineEl.classList.add('raw-reading-flagged');
         rawLineEl.textContent =
           analysis.rawDistanceCm != null
-            ? `Raw distance: ${analysis.rawDistanceCm.toFixed(2)} cm (Out of Range — rejected)`
-            : 'Raw sensor: Ultrasonic timeout (Out of Range)';
+            ? `Flagged: Raw distance ${analysis.rawDistanceCm.toFixed(2)} cm (Out of Range)`
+            : 'Flagged: Ultrasonic timeout (Out of Range)';
+      } else if (analysis.rawReadingStatus === 'SUSPICIOUS') {
+        rawLineEl.classList.add('raw-reading-spike');
+        rawLineEl.textContent = `Suspicious reading flagged: ${analysis.suspiciousReason}`;
       } else if (analysis.rawReadingStatus === 'SPIKE_REJECTED') {
         rawLineEl.classList.add('raw-reading-spike');
         rawLineEl.textContent =
           analysis.rawDistanceCm != null
-            ? `Raw distance: ${analysis.rawDistanceCm.toFixed(2)} cm (Isolated spike rejected)`
-            : 'Raw sensor: Isolated spike rejected';
+            ? `Suspicious jump rejected: ${analysis.rawDistanceCm.toFixed(2)} cm`
+            : 'Suspicious reading rejected';
+      } else if (cal.driftNote && telemetryState.mode === 'LIVE') {
+        rawLineEl.classList.add('raw-reading-spike');
+        rawLineEl.textContent = cal.driftNote;
+      } else if (analysis.authoritativeArduino && analysis.rawDistanceCm != null) {
+        rawLineEl.textContent = `Authoritative Arduino depth: ${analysis.filteredDepthCm.toFixed(2)} cm · Status: ${analysis.status}`;
       } else if (analysis.rawDistanceCm != null && analysis.rawDepthCm != null) {
-        rawLineEl.textContent = `Sensor distance: ${analysis.rawDistanceCm.toFixed(2)} cm · Raw depth: ${analysis.rawDepthCm.toFixed(2)} cm`;
+        rawLineEl.textContent = `Current distance: ${analysis.rawDistanceCm.toFixed(2)} cm · Raw depth: ${analysis.rawDepthCm.toFixed(2)} cm`;
       } else {
-        rawLineEl.textContent = 'Sensor distance: -- · Latest raw: --';
+        rawLineEl.textContent = 'Sensor distance: -- · Calibration: --';
       }
     }
 
-    // 5. Water-Level Trend
+    // 5. Water-Level Trend (explicitly distinguished from confirmed flood alerts)
     const trendValEl = document.getElementById('dashTrendValue');
     const trendMetaEl = document.getElementById('dashTrendMeta');
+    const trendAlertNoteEl = document.getElementById('dashTrendAlertNote');
     if (trendValEl) {
       trendValEl.className = 'metric-trend-text';
       if (analysis.trend === 'UNAVAILABLE') {
         trendValEl.classList.add('trend-unavailable');
-        trendValEl.textContent = 'Unavailable';
+        trendValEl.textContent = isConnLost ? 'Disconnected' : isStale ? 'Paused (Stale)' : 'Unavailable';
       } else if (analysis.trend === 'RISING') {
         trendValEl.classList.add('trend-rising');
         trendValEl.textContent = '▲ Rising Water';
@@ -1239,11 +1720,20 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       } else {
         trendValEl.classList.add('trend-uncertain');
         trendValEl.textContent =
-          analysis.trendLabel === 'Collecting baseline…' ? 'Collecting baseline…' : '? Uncertain';
+          analysis.trendLabel === 'Collecting baseline…' ? 'Collecting baseline…' : '? Trend Uncertain';
       }
     }
     if (trendMetaEl) {
       trendMetaEl.textContent = analysis.trendDetail || 'Waiting for timestamped measurements';
+    }
+    if (trendAlertNoteEl) {
+      if (analysis.alertConfidenceNote && analysis.available) {
+        trendAlertNoteEl.textContent = analysis.alertConfidenceNote;
+        trendAlertNoteEl.classList.remove('hidden');
+      } else {
+        trendAlertNoteEl.textContent = '';
+        trendAlertNoteEl.classList.add('hidden');
+      }
     }
 
     // 6. Rate of Change (cm/min)
@@ -1258,49 +1748,67 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       }
     }
     if (rateMetaEl) {
-      if (telemetryState.mode === 'UNAVAILABLE') {
-        rateMetaEl.textContent = 'Median filtering & spike rejection active';
+      if (isConnLost) {
+        rateMetaEl.textContent = 'Connection lost — rate paused';
+      } else if (isStale) {
+        rateMetaEl.textContent = 'Stale stream — rate paused';
+      } else if (telemetryState.mode === 'UNAVAILABLE') {
+        rateMetaEl.textContent = 'Median filtering & spike checks active';
       } else if (analysis.sensorQuality === 'OUT_OF_RANGE') {
         rateMetaEl.textContent = 'Rate paused — ultrasonic reading out of range';
       } else if (analysis.sensorQuality === 'UNSTABLE') {
         rateMetaEl.textContent = analysis.sensorQualityReason || 'Rate paused — signal unstable';
       } else if (analysis.rateCmPerMin == null) {
-        rateMetaEl.textContent = `Collecting baseline (${Math.min(4, analysis.sampleCount)}/4 clean samples)`;
+        rateMetaEl.textContent = `Collecting trend window (${Math.min(4, analysis.sampleCount)}/4 clean samples)`;
       } else {
         rateMetaEl.textContent = `Window: ${Math.min(10, analysis.sampleCount)} clean · R² = ${analysis.rSquared.toFixed(2)}`;
       }
     }
 
-    // 7. Early-Warning Threshold ETA
+    // 7. Early-Warning Threshold ETA & Prediction Confidence
     const etaWarnEl = document.getElementById('dashEtaWarnVal');
     const etaCritEl = document.getElementById('dashEtaCritVal');
+    const etaConfEl = document.getElementById('dashEtaConfidence');
     const etaNoteEl = document.getElementById('dashEtaNote');
     if (etaWarnEl) {
-      etaWarnEl.textContent = analysis.etaWarning.label;
+      etaWarnEl.textContent = analysis.etaWarning?.label || 'Insufficient Data';
       etaWarnEl.className =
         'eta-val' +
-        (analysis.etaWarning.reached
+        (analysis.etaWarning?.reached
           ? ' eta-reached'
-          : analysis.etaWarning.available
+          : analysis.etaWarning?.available
           ? ' eta-active'
           : '');
     }
     if (etaCritEl) {
-      etaCritEl.textContent = analysis.etaCritical.label;
+      etaCritEl.textContent = analysis.etaCritical?.label || 'Insufficient Data';
       etaCritEl.className =
         'eta-val' +
-        (analysis.etaCritical.reached
+        (analysis.etaCritical?.reached
           ? ' eta-reached'
-          : analysis.etaCritical.available
+          : analysis.etaCritical?.available
           ? ' eta-active'
           : '');
     }
+    if (etaConfEl) {
+      const confLabel = isConnLost
+        ? 'Insufficient Data (Disconnected)'
+        : isStale
+        ? 'Insufficient Data (Stale Stream)'
+        : analysis.predictionConfidenceLabel || 'Insufficient Data';
+      etaConfEl.textContent = `Confidence: ${confLabel}`;
+    }
     if (etaNoteEl) {
-      if (analysis.sensorQuality === 'OUT_OF_RANGE' || analysis.sensorQuality === 'UNSTABLE') {
+      if (isConnLost) {
+        etaNoteEl.textContent = 'ETA suppressed — USB connection lost.';
+      } else if (isStale) {
+        etaNoteEl.textContent = 'ETA suppressed — awaiting fresh Arduino reading.';
+      } else if (analysis.sensorQuality === 'OUT_OF_RANGE' || analysis.sensorQuality === 'UNSTABLE') {
         etaNoteEl.textContent = `ETA suppressed while sensor quality is ${analysis.sensorQualityLabel}.`;
       } else {
         etaNoteEl.textContent =
-          'Shown only when sensor quality is Good and water rises reliably.';
+          analysis.predictionLimitation ||
+          'Trend-based linear extrapolation only (not a validated weather forecast).';
       }
     }
 
@@ -1308,16 +1816,22 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     const hwConn = document.getElementById('hwSerialConnVal');
     const hwLastTs = document.getElementById('hwLastTimestampVal');
     const hwQuality = document.getElementById('hwSensorQualityVal');
+    const hwCalibStatus = document.getElementById('hwCalibStatusVal');
     const hwFilteredDist = document.getElementById('hwFilteredDistanceVal');
     const hwDist = document.getElementById('hwDistanceVal');
     const hwMount = document.getElementById('hwMountHeightVal');
+    const hwSuspicious = document.getElementById('hwSuspiciousCountVal');
     const hwRawLine = document.getElementById('hwRawSerialLine');
     const hwFloatStatus = document.getElementById('hwFloatStatusVal');
     const hwSupabase = document.getElementById('hwSupabaseDemoStatus');
 
     if (hwConn) {
       if (arduinoClient.connected && telemetryState.mode === 'LIVE') {
-        hwConn.textContent = `Connected (${telemetryState.latestHardware.format === 'text' ? '115200 Text' : '115200 JSON'})`;
+        hwConn.textContent = `Connected (${telemetryState.latestHardware.format === 'text' ? '115200 Authoritative Text' : '115200 JSON'})`;
+      } else if (isConnLost) {
+        hwConn.textContent = 'Connection Lost (USB Disconnected)';
+      } else if (isStale) {
+        hwConn.textContent = 'USB Open — Stale (>6s without packet)';
       } else if (arduinoClient.connected) {
         hwConn.textContent = 'USB Open (Awaiting data)';
       } else if (telemetryState.mode === 'SIMULATED') {
@@ -1328,6 +1842,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     }
     if (hwLastTs) hwLastTs.textContent = lastReadingTimeStr;
     if (hwQuality) hwQuality.textContent = analysis.sensorQualityLabel;
+    if (hwCalibStatus) hwCalibStatus.textContent = calibStatusLong;
     if (hwFilteredDist) {
       hwFilteredDist.textContent =
         analysis.available && analysis.filteredDistanceCm != null
@@ -1339,6 +1854,8 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         const flag =
           analysis.rawReadingStatus === 'OUT_OF_RANGE'
             ? ' (Out of Range)'
+            : analysis.rawReadingStatus === 'SUSPICIOUS'
+            ? ' (Suspicious — flagged)'
             : analysis.rawReadingStatus === 'SPIKE_REJECTED'
             ? ' (Spike rejected)'
             : '';
@@ -1350,28 +1867,442 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       }
     }
     if (hwMount) {
-      hwMount.textContent = `${Number(analysis.mountHeightCm || cfg.mountHeightCm).toFixed(2)} cm`;
+      if (cal.baselineCm != null) {
+        hwMount.textContent = `${cal.baselineCm.toFixed(2)} cm (locked)`;
+      } else {
+        hwMount.textContent = `${Number(cfg.mountHeightCm).toFixed(2)} cm (default)`;
+      }
+    }
+    if (hwSuspicious) {
+      hwSuspicious.textContent =
+        telemetryState.suspiciousTotalCount > 0
+          ? `${telemetryState.suspiciousTotalCount} flagged (no data invented)`
+          : '0';
     }
     if (hwRawLine) {
       hwRawLine.textContent = telemetryState.latestHardware.lastRawLine || '--';
     }
     if (hwFloatStatus) {
-      const fl = telemetryState.latestHardware.floatLow;
-      const fh = telemetryState.latestHardware.floatHigh;
-      if (telemetryState.mode === 'UNAVAILABLE' || (fl === null && fh === null)) {
-        hwFloatStatus.textContent = 'Not reported by current stream';
+      if (floatSwitchState.state) {
+        const tsStr = floatSwitchState.lastUpdatedMs
+          ? ` · ${new Date(floatSwitchState.lastUpdatedMs).toLocaleTimeString()}`
+          : '';
+        hwFloatStatus.textContent = `Liyafy XSL-3508-P: ${floatSwitchState.state}${tsStr}`;
       } else {
-        const suffix = telemetryState.mode === 'SIMULATED' ? ' (Demo)' : '';
-        hwFloatStatus.textContent = `Low: ${fl ? 'Triggered' : 'Dry'} · High: ${fh ? 'Triggered' : 'Dry'}${suffix}`;
+        const fl = telemetryState.latestHardware.floatLow;
+        const fh = telemetryState.latestHardware.floatHigh;
+        if (telemetryState.mode === 'UNAVAILABLE' || (fl === null && fh === null)) {
+          hwFloatStatus.textContent = 'Awaiting Float Switch: OPEN / CLOSED';
+        } else {
+          const suffix = telemetryState.mode === 'SIMULATED' ? ' (Demo)' : '';
+          hwFloatStatus.textContent = `Low: ${fl ? 'Triggered' : 'Dry'} · High: ${fh ? 'Triggered' : 'Dry'}${suffix}`;
+        }
       }
     }
     if (hwSupabase) {
       hwSupabase.textContent = supabaseDemoState.summaryText;
     }
 
+    renderActionableGuidance(analysis, isStale, isConnLost);
+    renderLiveWalkthroughPanel(analysis);
+    renderMeasurementValidationPanel(analysis);
+    renderBackupFloatPanel();
+    renderTestSessionPanel();
     renderRiskIntelligencePanel();
     renderAlertHistoryPanel();
     drawWaterHistoryChart();
+  }
+
+  function renderActionableGuidance(analysis, isStale, isConnLost) {
+    const card = document.getElementById('actionableGuidanceCard');
+    const tag = document.getElementById('actionableGuidanceTag');
+    const sub = document.getElementById('actionableGuidanceSubtitle');
+    const list = document.getElementById('actionableGuidanceList');
+    if (!card || !tag || !sub || !list) return;
+
+    const status = isConnLost || isStale ? 'UNAVAILABLE' : (analysis?.status || 'UNAVAILABLE');
+    const depthStr = analysis?.available && analysis?.filteredDepthCm != null
+      ? `${analysis.filteredDepthCm.toFixed(2)} cm`
+      : null;
+
+    card.className = 'surface-card actionable-guidance-card dash-panel-gap';
+    let items = [];
+
+    if (status === 'CRITICAL') {
+      card.classList.add('guidance-critical');
+      tag.className = 'status-tag tag-critical';
+      tag.textContent = 'CRITICAL ACTION';
+      sub.textContent = depthStr
+        ? `Critical standing water detected (${depthStr} >= ${prototypeSettingsState.values.critThresholdCm.toFixed(2)} cm) — immediate safety precautions recommended.`
+        : 'Critical standing water detected — immediate safety precautions recommended.';
+      items = [
+        'Avoid walking, cycling, or driving through flooded roadways and underpasses — never cross moving or standing street water.',
+        'Move out of basement apartments or below-grade spaces to higher ground immediately if water begins entering.',
+        'Keep clear of downed power lines, submerged electrical outlets, and open or overflowing manhole covers.',
+        'Follow official NYC Emergency Management (Notify NYC) and National Weather Service Flash Flood alerts.'
+      ];
+    } else if (status === 'WARNING') {
+      card.classList.add('guidance-warning');
+      tag.className = 'status-tag tag-warn';
+      tag.textContent = 'WARNING — PREPARE';
+      const etaText =
+        analysis?.etaCritical?.available && !analysis?.etaCritical?.reached
+          ? ` (linear trend ETA to Critical: ${analysis.etaCritical.label})`
+          : '';
+      sub.textContent = depthStr
+        ? `Elevated water detected (${depthStr})${etaText} — monitor closely and take precautionary steps.`
+        : 'Elevated water detected — monitor closely and take precautionary steps.';
+      items = [
+        'Monitor rising water levels closely and inspect nearby storm-drain grates safely from dry ground for leaf or trash blockages.',
+        'Move valuables, electronics, and vehicles out of low-lying streets, driveways, or basement entrances before water climbs further.',
+        'Check basement sump pumps, door barriers, and backup flashlights; prepare an evacuation route to higher floors if needed.',
+        'Monitor live Open-Meteo rainfall rates and official NWS / Notify NYC advisories for intensifying storms.'
+      ];
+    } else if (status === 'NORMAL') {
+      card.classList.add('guidance-normal');
+      tag.className = 'status-tag tag-normal';
+      tag.textContent = 'NORMAL — ROUTINE';
+      sub.textContent = depthStr
+        ? `Street depth is within normal range (${depthStr} < ${prototypeSettingsState.values.warnThresholdCm.toFixed(2)} cm).`
+        : 'Street depth is within normal range.';
+      items = [
+        'Normal drainage conditions on the monitored street surface — continue routine monitoring.',
+        'Before forecasted rain, clear leaves and litter off neighborhood catch-basin grates so runoff can enter sewers freely.',
+        'Review NYC Emergency Management flood readiness plans and sign up for official Notify NYC alerts.'
+      ];
+    } else if (status === 'OUT_OF_RANGE') {
+      tag.className = 'status-tag tag-warn';
+      tag.textContent = 'SENSOR CHECK';
+      sub.textContent = 'Ultrasonic sensor reading is out of range — flood status cannot be confirmed.';
+      items = [
+        'Do not assume the street is dry while the sensor reports Out of Range — inspect the physical roadway or water basin directly.',
+        'Check HC-SR04 wiring (TRIG D9, ECHO voltage divider to D10), sensor alignment, and water proximity to the ~2 cm blind zone.',
+        'Rely on visual observation and official NYC Emergency Management / NWS alerts whenever sensor telemetry is invalid.'
+      ];
+    } else {
+      tag.className = 'status-tag tag-neutral';
+      tag.textContent = isConnLost ? 'DISCONNECTED' : isStale ? 'STALE DATA' : 'UNAVAILABLE';
+      sub.textContent = isConnLost
+        ? 'Arduino USB connection was lost — reconnect hardware to resume live status guidance.'
+        : isStale
+        ? 'No fresh sensor packet received in > 6 seconds — status guidance paused.'
+        : 'Connect your Arduino GIGA R1 WiFi over USB to receive live status-based guidance, or start Demo Mode for a simulated walkthrough.';
+      items = [
+        'Connect your Arduino GIGA R1 WiFi over USB (115200 baud) to activate real-time status-based flood guidance.',
+        'Check live NYC Weather & Rainfall Forecast below for upcoming heavy precipitation before street ponding starts.',
+        'Keep nearby storm-drain grates free of debris and always follow official NYCEM / NWS alerts during real storms.'
+      ];
+    }
+
+    list.innerHTML = items.map((txt) => `<li>${escapeHtml(txt)}</li>`).join('');
+  }
+
+  function renderLiveWalkthroughPanel(analysis) {
+    const badge = document.getElementById('walkthroughModeBadge');
+    const grid = document.getElementById('walkthroughStepsGrid');
+    if (!badge || !grid) return;
+
+    const isLive = telemetryState.mode === 'LIVE' && telemetryState.streamHealth === 'OK';
+    const isSim = telemetryState.mode === 'SIMULATED';
+
+    if (isLive) {
+      badge.className = 'status-tag tag-normal';
+      badge.textContent = 'LIVE Arduino Mode';
+    } else if (isSim) {
+      badge.className = 'status-tag tag-info';
+      badge.textContent = 'SIMULATED Demo Mode (Separate)';
+    } else {
+      badge.className = 'status-tag tag-neutral';
+      badge.textContent = 'Awaiting LIVE Arduino';
+    }
+
+    // Auto-highlight milestones ONLY from authentic LIVE Arduino readings
+    if (isLive && analysis && analysis.available) {
+      if (analysis.status === 'NORMAL') {
+        walkthroughState.autoDone.add(1);
+      }
+      if (analysis.trend === 'RISING') {
+        walkthroughState.autoDone.add(5);
+      }
+      if (analysis.status === 'WARNING' || analysis.status === 'CRITICAL') {
+        walkthroughState.autoDone.add(6);
+        walkthroughState.autoDone.add(8);
+        walkthroughState.sawFloodInLive = true;
+      }
+      if (
+        (analysis.etaWarning?.available && !analysis.etaWarning?.reached) ||
+        (analysis.etaCritical?.available && !analysis.etaCritical?.reached)
+      ) {
+        walkthroughState.autoDone.add(7);
+      }
+      if (walkthroughState.sawFloodInLive && (analysis.trend === 'FALLING' || analysis.status === 'NORMAL')) {
+        walkthroughState.autoDone.add(9);
+      }
+    }
+
+    // Determine active highlighted step
+    let activeStep = null;
+    if (isLive && analysis && analysis.available) {
+      if (analysis.status === 'CRITICAL') activeStep = 6;
+      else if (analysis.etaCritical?.available && !analysis.etaCritical?.reached) activeStep = 7;
+      else if (analysis.status === 'WARNING') activeStep = 6;
+      else if (analysis.trend === 'RISING') activeStep = 5;
+      else if (walkthroughState.sawFloodInLive && analysis.trend === 'FALLING') activeStep = 9;
+      else if (analysis.status === 'NORMAL') activeStep = 1;
+    }
+
+    grid.querySelectorAll('.walkthrough-step').forEach((btn) => {
+      const stepNum = Number(btn.getAttribute('data-step'));
+      const done = walkthroughState.manualDone.has(stepNum) || walkthroughState.autoDone.has(stepNum);
+      btn.classList.toggle('step-done', done);
+      btn.classList.toggle('step-active', activeStep === stepNum);
+      btn.setAttribute('aria-pressed', done ? 'true' : 'false');
+    });
+  }
+
+  function renderMeasurementValidationPanel(analysis) {
+    const sensorPreview = document.getElementById('valSensorReadoutPreview');
+    const logBtn = document.getElementById('btnLogRulerComparison');
+    const statusBadge = document.getElementById('validationStatusBadge');
+    const liveCountEl = document.getElementById('valLiveCount');
+    const maeEl = document.getElementById('valMaeCm');
+    const maxErrEl = document.getElementById('valMaxErrCm');
+    const biasEl = document.getElementById('valBiasCm');
+    const summaryNoteEl = document.getElementById('validationSummaryNote');
+    const tableWrap = document.getElementById('validationTableWrap');
+    const tbody = document.getElementById('validationTableBody');
+
+    const activeAnalysis = analysis || telemetryState.latestAnalysis;
+    const hasValidReading =
+      (telemetryState.mode === 'LIVE' || telemetryState.mode === 'SIMULATED') &&
+      telemetryState.streamHealth !== 'STALE' &&
+      telemetryState.streamHealth !== 'CONNECTION_LOST' &&
+      activeAnalysis &&
+      activeAnalysis.available &&
+      activeAnalysis.filteredDepthCm != null;
+
+    if (sensorPreview) {
+      if (hasValidReading) {
+        const modeTag = telemetryState.mode === 'LIVE' ? 'LIVE' : 'SIM';
+        sensorPreview.value = `${activeAnalysis.filteredDepthCm.toFixed(2)} cm (${modeTag})`;
+      } else {
+        sensorPreview.value = 'No valid sensor reading';
+      }
+    }
+    if (logBtn) {
+      logBtn.disabled = !hasValidReading;
+    }
+
+    const summary = summarizeValidationResults(validationState.entries);
+
+    if (statusBadge) {
+      statusBadge.className = `status-tag ${summary.statusTagClass}`;
+      statusBadge.textContent = summary.statusLabel;
+    }
+    if (liveCountEl) liveCountEl.textContent = String(summary.liveCount);
+    if (maeEl) maeEl.textContent = summary.maeCm != null ? `±${summary.maeCm.toFixed(2)} cm` : '-- cm';
+    if (maxErrEl) maxErrEl.textContent = summary.maxAbsErrorCm != null ? `${summary.maxAbsErrorCm.toFixed(2)} cm` : '-- cm';
+    if (biasEl) {
+      biasEl.textContent =
+        summary.meanBiasCm != null
+          ? `${summary.meanBiasCm >= 0 ? '+' : ''}${summary.meanBiasCm.toFixed(2)} cm`
+          : '-- cm';
+    }
+    if (summaryNoteEl) summaryNoteEl.textContent = summary.summaryNote;
+
+    if (tableWrap && tbody) {
+      if (validationState.entries.length === 0) {
+        tableWrap.classList.add('hidden');
+        tbody.innerHTML = '';
+      } else {
+        tableWrap.classList.remove('hidden');
+        tbody.innerHTML = validationState.entries
+          .slice(0, 25)
+          .map((e) => {
+            const sign = e.signedErrorCm >= 0 ? '+' : '';
+            const srcClass = e.sourceMode === 'LIVE' ? 'tag-normal' : 'tag-info';
+            return `<tr>
+              <td class="mono-text">${escapeHtml(new Date(e.timestampMs).toLocaleTimeString())}</td>
+              <td><span class="status-tag ${srcClass}">${escapeHtml(e.sourceMode)}</span></td>
+              <td class="num-col mono-text">${e.rulerCm.toFixed(2)}</td>
+              <td class="num-col mono-text">${e.sensorCm.toFixed(2)}</td>
+              <td class="num-col mono-text">${sign}${e.signedErrorCm.toFixed(2)} cm</td>
+              <td class="num-col mono-text"><strong>${e.absErrorCm.toFixed(2)} cm</strong></td>
+              <td>${escapeHtml(e.note || '—')}</td>
+            </tr>`;
+          })
+          .join('');
+      }
+    }
+  }
+
+  function renderBackupFloatPanel() {
+    const stateCard = document.getElementById('floatStateCard');
+    const stateVal = document.getElementById('floatSwitchStateVal');
+    const metaLine = document.getElementById('floatSwitchMetaLine');
+    const validBadge = document.getElementById('floatValidationBadge');
+    const agreeTag = document.getElementById('floatAgreementTag');
+    const agreeDetail = document.getElementById('floatAgreementDetail');
+    const heightInput = document.getElementById('floatActivationHeightInput');
+    const polaritySel = document.getElementById('floatClosedPolaritySelect');
+    const clearHeightBtn = document.getElementById('btnClearFloatHeight');
+    const transCountEl = document.getElementById('floatTransitionCountVal');
+    const emptyEl = document.getElementById('floatHistoryEmpty');
+    const wrapEl = document.getElementById('floatHistoryWrap');
+    const tbody = document.getElementById('floatHistoryTableBody');
+
+    const fs = floatSwitchState;
+
+    if (stateCard && stateVal) {
+      if (fs.state === 'OPEN') {
+        stateCard.className = 'float-state-box float-state-open';
+        stateVal.textContent = 'OPEN';
+      } else if (fs.state === 'CLOSED') {
+        stateCard.className = 'float-state-box float-state-closed';
+        stateVal.textContent = 'CLOSED';
+      } else {
+        stateCard.className = 'float-state-box float-state-awaiting';
+        stateVal.textContent = 'AWAITING DATA';
+      }
+    }
+
+    if (metaLine) {
+      if (fs.state && fs.lastUpdatedMs) {
+        metaLine.textContent = `Last update: ${new Date(fs.lastUpdatedMs).toLocaleTimeString()} · ${fs.lastRawLine || `Float Switch: ${fs.state}`}`;
+      } else {
+        metaLine.innerHTML = 'Waiting for <code>Float Switch: OPEN</code> or <code>Float Switch: CLOSED</code> over USB Serial';
+      }
+    }
+
+    const hasHeight = fs.activationHeightCm != null && Number.isFinite(fs.activationHeightCm) && fs.activationHeightCm > 0;
+    if (validBadge) {
+      if (hasHeight) {
+        validBadge.textContent = `Height Configured (${fs.activationHeightCm.toFixed(2)} cm)`;
+        validBadge.className = 'status-tag tag-info';
+      } else {
+        validBadge.textContent = 'Electrical Test Only (Not Mounted)';
+        validBadge.className = 'status-tag tag-neutral';
+      }
+    }
+
+    if (heightInput && document.activeElement !== heightInput) {
+      heightInput.value = hasHeight ? fs.activationHeightCm.toFixed(2) : '';
+    }
+    if (polaritySel && document.activeElement !== polaritySel) {
+      polaritySel.value = fs.closedMeansWater ? 'water' : 'dry';
+    }
+    if (clearHeightBtn) {
+      clearHeightBtn.disabled = !hasHeight;
+    }
+
+    const agreement = evaluateFloatAgreement(
+      fs,
+      telemetryState.mode === 'LIVE' ? telemetryState.latestAnalysis : null
+    );
+    if (agreeTag) {
+      agreeTag.textContent = agreement.label;
+      agreeTag.className = `status-tag ${agreement.tagClass}`;
+    }
+    if (agreeDetail) {
+      agreeDetail.textContent = agreement.detail;
+    }
+
+    if (transCountEl) {
+      transCountEl.textContent = String(fs.transitionCount);
+    }
+
+    if (emptyEl && wrapEl && tbody) {
+      if (fs.history.length === 0) {
+        emptyEl.classList.remove('hidden');
+        wrapEl.classList.add('hidden');
+      } else {
+        emptyEl.classList.add('hidden');
+        wrapEl.classList.remove('hidden');
+        tbody.innerHTML = fs.history
+          .map((item) => {
+            const tagCls = item.newState === 'CLOSED' ? 'tag-warn' : 'tag-info';
+            const depthText =
+              item.ultrasonicDepthCm != null ? `${item.ultrasonicDepthCm.toFixed(2)} cm` : '--';
+            return `
+              <tr>
+                <td class="mono-text">${escapeHtml(new Date(item.timestampMs).toLocaleTimeString())}</td>
+                <td><span class="status-tag ${tagCls}">${escapeHtml(item.transitionLabel)}</span></td>
+                <td class="num-col">${escapeHtml(depthText)}</td>
+              </tr>
+            `;
+          })
+          .join('');
+      }
+    }
+  }
+
+  function renderTestSessionPanel() {
+    const summary = sessionRecorder.getSummary();
+    const statusTag = document.getElementById('sessionStatusTag');
+    const timerEl = document.getElementById('sessionTimerVal');
+    const btnToggle = document.getElementById('btnToggleRecording');
+    const btnPumpStop = document.getElementById('btnMarkPumpStopped');
+    const btnCsv = document.getElementById('btnDownloadSessionCsv');
+    const btnSummary = document.getElementById('btnToggleSessionSummary');
+    const btnReset = document.getElementById('btnResetSession');
+
+    const countEl = document.getElementById('sessionSampleCountVal');
+    const minMaxEl = document.getElementById('sessionMinMaxVal');
+    const timesEl = document.getElementById('sessionStatusTimesVal');
+    const transEl = document.getElementById('sessionTransitionsVal');
+    const recEl = document.getElementById('sessionRecoveryVal');
+    const summaryCard = document.getElementById('sessionSummaryCard');
+    const summaryList = document.getElementById('sessionSummaryList');
+
+    if (statusTag) {
+      if (summary.recording) {
+        statusTag.textContent = `Recording (${summary.sourceMode})`;
+        statusTag.className = 'status-tag tag-crit';
+      } else if (summary.hasData) {
+        statusTag.textContent = 'Completed';
+        statusTag.className = 'status-tag tag-normal';
+      } else {
+        statusTag.textContent = 'Ready';
+        statusTag.className = 'status-tag tag-neutral';
+      }
+    }
+
+    if (timerEl) timerEl.textContent = formatClockTimer(summary.durationMs);
+    if (btnToggle) {
+      btnToggle.textContent = summary.recording ? 'Stop Recording' : 'Record Test Session';
+      btnToggle.className = summary.recording ? 'btn btn-sm btn-danger' : 'btn btn-sm btn-cyan';
+    }
+    if (btnPumpStop) {
+      btnPumpStop.classList.toggle('hidden', !summary.recording);
+      btnPumpStop.disabled = !summary.recording;
+      btnPumpStop.textContent = summary.pumpStoppedAtMs ? 'Pump 2 Stopped ✓' : 'Mark Pump 2 Stopped';
+    }
+    if (btnCsv) btnCsv.disabled = !summary.hasData;
+    if (btnSummary) btnSummary.disabled = !summary.hasData;
+    if (btnReset) btnReset.disabled = !summary.hasData && !summary.recording;
+
+    if (countEl) countEl.textContent = String(summary.sampleCount);
+    if (minMaxEl) {
+      minMaxEl.textContent =
+        summary.minDepthCm != null && summary.maxDepthCm != null
+          ? `${summary.minDepthCm.toFixed(2)} / ${summary.maxDepthCm.toFixed(2)} cm`
+          : '-- / -- cm';
+    }
+    if (timesEl) {
+      timesEl.textContent = `${formatDurationSeconds(summary.statusSeconds.NORMAL)} / ${formatDurationSeconds(summary.statusSeconds.WARNING)} / ${formatDurationSeconds(summary.statusSeconds.CRITICAL)}`;
+    }
+    if (transEl) transEl.textContent = String(summary.statusTransitionCount);
+    if (recEl) recEl.textContent = summary.hasData ? summary.recoverySummaryText : 'Not recorded yet';
+
+    if (summaryCard && summaryList) {
+      const shouldShow = sessionUiState.showSummary && summary.hasData;
+      summaryCard.classList.toggle('hidden', !shouldShow);
+      if (shouldShow) {
+        summaryList.innerHTML = summary.classroomHighlights
+          .map((item) => `<li>${escapeHtml(item)}</li>`)
+          .join('');
+      }
+    }
   }
 
   function renderRiskIntelligencePanel() {
@@ -1460,11 +2391,11 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     wrapEl?.classList.remove('hidden');
 
     const statusCls = (st) =>
-      st === 'CRITICAL'
+      st === 'CRITICAL' || st === 'CONNECTION_LOST'
         ? 'event-status-critical'
-        : st === 'WARNING'
+        : st === 'WARNING' || st === 'STALE_DATA' || st === 'OUT_OF_RANGE'
         ? 'event-status-warning'
-        : st === 'NORMAL'
+        : st === 'NORMAL' || st === 'RECALIBRATED'
         ? 'event-status-normal'
         : 'event-status-other';
 
@@ -1858,16 +2789,57 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
   /* --------------------------------------------------------------------------
    * 6C. OPTIONAL SERVER-SIDE AI FLOODGUARD ASSISTANT CONTROLLER
    * -------------------------------------------------------------------------- */
+  function getAssistantApiBase() {
+    const raw =
+      typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_ASSISTANT_API_URL
+        ? String(import.meta.env.VITE_ASSISTANT_API_URL).trim()
+        : '';
+    if (!raw) return '';
+    const cleaned = raw.replace(/\/+$/, '');
+    return /^https?:\/\//i.test(cleaned) ? cleaned : '';
+  }
+
+  function buildAssistantEndpoint(pathname) {
+    const base = getAssistantApiBase();
+    return base ? `${base}${pathname}` : pathname;
+  }
+
+  async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function checkAiAssistantStatus() {
     aiAssistantState.statusChecked = true;
+    const apiBase = getAssistantApiBase();
+    const statusUrl = buildAssistantEndpoint('/api/assistant/status');
+
     try {
-      const resp = await fetch('/api/assistant/status', { headers: { Accept: 'application/json' } });
+      const resp = await fetchWithTimeout(
+        statusUrl,
+        { headers: { Accept: 'application/json' } },
+        20000
+      );
       const contentType = resp.headers.get('content-type') || '';
       if (!resp.ok || !contentType.includes('application/json')) {
         aiAssistantState.available = false;
-        aiAssistantState.statusLabel = 'Backend Required';
-        aiAssistantState.statusNote =
-          'The optional AI Assistant requires the Node/Express server runtime (not available on static GitHub Pages). Rule-based FloodGuard Risk Intelligence remains fully active.';
+        if (!apiBase) {
+          aiAssistantState.statusLabel = 'Backend URL Not Set';
+          aiAssistantState.statusNote =
+            'GitHub Pages serves static files only. Deploy the Node/Express backend on Render and set the VITE_ASSISTANT_API_URL repository variable to enable the AI Assistant. Rule-based FloodGuard Risk Intelligence remains fully active.';
+        } else if (resp.status === 403) {
+          aiAssistantState.statusLabel = 'CORS Blocked';
+          aiAssistantState.statusNote =
+            'The configured AI backend rejected this site origin. Verify ALLOWED_ORIGINS on your Render backend includes your GitHub Pages origin (e.g. https://kdawtech.github.io).';
+        } else {
+          aiAssistantState.statusLabel = 'Backend Unavailable';
+          aiAssistantState.statusNote = `The configured AI backend returned HTTP ${resp.status}. Rule-based FloodGuard Risk Intelligence remains fully active.`;
+        }
         renderAiAssistantPanel();
         return;
       }
@@ -1875,11 +2847,15 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       aiAssistantState.available = Boolean(data.available);
       aiAssistantState.statusLabel = data.available ? 'Gemini Ready' : 'API Key Needed';
       aiAssistantState.statusNote = data.note || '';
-    } catch {
+    } catch (err) {
       aiAssistantState.available = false;
-      aiAssistantState.statusLabel = 'Backend Unavailable';
-      aiAssistantState.statusNote =
-        'Unable to reach /api/assistant. Rule-based FloodGuard Risk Intelligence remains fully active.';
+      const isTimeout = err && err.name === 'AbortError';
+      aiAssistantState.statusLabel = apiBase ? 'Backend Waking / Offline' : 'Backend Unavailable';
+      aiAssistantState.statusNote = apiBase
+        ? isTimeout
+          ? 'The Render backend is waking up from standby (free-tier cold start). You can try asking a question in a few seconds.'
+          : 'Unable to reach the configured AI backend URL. Verify the Render service is running and ALLOWED_ORIGINS permits this site.'
+        : 'Unable to reach /api/assistant. Rule-based FloodGuard Risk Intelligence remains fully active.';
     }
     renderAiAssistantPanel();
   }
@@ -1887,20 +2863,43 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
   function buildAssistantContextSnapshot() {
     const analysis = telemetryState.latestAnalysis;
     const intel = telemetryState.latestRiskIntel;
+    const settings = getEffectiveThresholds();
     const w = weatherState.data;
+    const cal = telemetryState.calibration;
+
     return {
-      sourceMode: telemetryState.mode === 'SIMULATED' ? 'DEMO MODE (Simulated)' : telemetryState.mode,
+      sourceMode:
+        telemetryState.mode === 'LIVE'
+          ? 'LIVE Arduino GIGA R1 WiFi (USB Serial)'
+          : telemetryState.mode === 'SIMULATED'
+          ? 'DEMO MODE (Simulated)'
+          : 'UNAVAILABLE (No Sensor Connected)',
+      streamHealth: telemetryState.streamHealth || 'IDLE',
       status: analysis?.status || 'UNAVAILABLE',
+      statusSource: analysis?.statusSource || '',
       depthCm: analysis?.filteredDepthCm ?? null,
       distanceCm: analysis?.filteredDistanceCm ?? analysis?.rawDistanceCm ?? null,
+      baselineCm: cal?.baselineCm ?? analysis?.mountHeightCm ?? null,
+      calibrationStatus: cal?.status || 'UNSET',
+      warningThresholdCm: settings?.warnThresholdCm ?? null,
+      criticalThresholdCm: settings?.critThresholdCm ?? null,
       trend: analysis?.trendLabel || 'Unavailable',
       rateCmPerMin: analysis?.rateCmPerMin ?? null,
+      etaWarningLabel: analysis?.etaWarning?.label || 'Insufficient Data',
+      etaCriticalLabel: analysis?.etaCritical?.label || 'Insufficient Data',
+      predictionConfidence: analysis?.predictionConfidenceLabel || 'Insufficient Data',
       sensorQuality: analysis?.sensorQualityLabel || 'Unavailable',
+      suspiciousReading: Boolean(analysis?.suspiciousReading),
+      suspiciousReason: analysis?.suspiciousReason || '',
       riskLevel: intel?.riskLabel || 'Awaiting Data',
+      trajectoryLabel: intel?.trajectoryLabel || '',
+      rapidRiseDetected: Boolean(intel?.rapidRiseDetected),
       blockedDrainSuspected: Boolean(intel?.blockedDrainSuspected),
+      riskDrivers: Array.isArray(intel?.drivers) ? intel.drivers.slice(0, 5) : [],
       weatherSummary: w
-        ? `${w.current.condition}, ${w.current.tempF}°F, current rain ${w.current.precipMm} mm/h, next 6h ${w.summary.next6hPrecipMm} mm (max ${w.summary.maxRainProb6h}% prob), ${w.severity.label}`
-        : 'Open-Meteo weather unavailable'
+        ? `${w.current.condition}, ${w.current.tempF != null ? `${w.current.tempF}°F` : '--'}, current rain ${w.current.precipMm} mm/h, next 6h ${w.summary.next6hPrecipMm} mm (peak ${w.summary.peakRate6hMm ?? 0} mm/h, max ${w.summary.maxRainProb6h}% prob), ${w.severity.label}`
+        : 'Open-Meteo weather unavailable',
+      weatherUpdatedAt: w?.fetchedAt || ''
     };
   }
 
@@ -1908,24 +2907,33 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     const question = String(rawQuestion || '').trim();
     if (!question || aiAssistantState.loading) return;
 
+    const apiBase = getAssistantApiBase();
+    const endpoint = buildAssistantEndpoint('/api/assistant');
+
     aiAssistantState.loading = true;
     aiAssistantState.error = '';
     renderAiAssistantPanel();
 
     try {
-      const resp = await fetch('/api/assistant', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          question,
-          context: buildAssistantContextSnapshot()
-        })
-      });
+      const resp = await fetchWithTimeout(
+        endpoint,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            question,
+            context: buildAssistantContextSnapshot()
+          })
+        },
+        45000
+      );
 
       const contentType = resp.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
         throw new Error(
-          'AI Assistant endpoint (/api/assistant) is not hosted on this static deployment. Run the full-stack Node server to enable server-side Gemini responses.'
+          apiBase
+            ? `Configured AI backend (${apiBase}) returned a non-JSON response (HTTP ${resp.status}). Verify the Render service URL and deployment status.`
+            : 'AI Assistant backend is not configured for this static site. Deploy the backend on Render and set VITE_ASSISTANT_API_URL in GitHub Actions Variables.'
         );
       }
 
@@ -1945,9 +2953,15 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       }
       aiAssistantState.available = true;
       aiAssistantState.statusLabel = 'Gemini Ready';
+      aiAssistantState.statusNote = '';
     } catch (err) {
-      aiAssistantState.error =
-        err instanceof Error ? err.message : 'Unable to reach AI FloodGuard Assistant.';
+      if (err && err.name === 'AbortError') {
+        aiAssistantState.error =
+          'The request timed out while waiting for the AI backend (Render free instances can take ~30 seconds to wake up). Please try again.';
+      } else {
+        aiAssistantState.error =
+          err instanceof Error ? err.message : 'Unable to reach AI FloodGuard Assistant.';
+      }
     } finally {
       aiAssistantState.loading = false;
       renderAiAssistantPanel();
@@ -2879,7 +3893,159 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     });
 
     document.getElementById('btnDisconnectArduino')?.addEventListener('click', async () => {
-      await arduinoClient.disconnect();
+      await arduinoClient.disconnect({ reason: 'manual', message: 'Arduino USB disconnected by user.' });
+    });
+
+    // Manual Dry-Road Recalibration ('c' serial command with dry-road confirmation)
+    document.getElementById('btnOpenRecalibrate')?.addEventListener('click', () => {
+      if (!arduinoClient.connected) {
+        showToast('Connect your Arduino GIGA R1 WiFi over USB first.', 'WARNING');
+        return;
+      }
+      const currentStatus = telemetryState.latestAnalysis?.status;
+      if (currentStatus === 'WARNING' || currentStatus === 'CRITICAL') {
+        showToast(
+          `Active ${currentStatus} flood detected — drain the roadway completely before recalibrating!`,
+          'WARNING'
+        );
+      }
+      const strip = document.getElementById('recalibrateConfirmStrip');
+      const chk = document.getElementById('chkConfirmDryRoad');
+      const confirmBtn = document.getElementById('btnConfirmRecalibrate');
+      if (chk) chk.checked = false;
+      if (confirmBtn) confirmBtn.disabled = true;
+      strip?.classList.remove('hidden');
+      strip?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+
+    document.getElementById('chkConfirmDryRoad')?.addEventListener('change', (e) => {
+      const confirmBtn = document.getElementById('btnConfirmRecalibrate');
+      if (confirmBtn) confirmBtn.disabled = !e.target.checked;
+    });
+
+    document.getElementById('btnCancelRecalibrate')?.addEventListener('click', () => {
+      closeRecalibratePanel();
+    });
+
+    document.getElementById('btnConfirmRecalibrate')?.addEventListener('click', async () => {
+      const chk = document.getElementById('chkConfirmDryRoad');
+      if (!chk || !chk.checked) {
+        showToast('Please confirm the roadway is completely dry before recalibrating.', 'WARNING');
+        return;
+      }
+      if (!arduinoClient.connected) {
+        closeRecalibratePanel();
+        showToast('Arduino USB is no longer connected.', 'WARNING');
+        return;
+      }
+
+      const confirmBtn = document.getElementById('btnConfirmRecalibrate');
+      setButtonBusy(confirmBtn, 'Sending "c"…', true);
+      try {
+        const res = await arduinoClient.sendCommand('c');
+        if (res.ok) {
+          closeRecalibratePanel();
+          resetCalibrationState('CALIBRATING');
+          telemetryState.samples = [];
+          setDashboardNotice(
+            'Sent "c" recalibration command to Arduino GIGA R1 WiFi. Keep the roadway dry while the new baseline locks…',
+            'info'
+          );
+          showToast('Sent "c" recalibration command to Arduino.', 'NORMAL');
+          recalculateTelemetryAndRender(false);
+        } else {
+          showToast(res.error || 'Could not send recalibration command.', 'CRITICAL');
+        }
+      } finally {
+        setButtonBusy(confirmBtn, "Send 'c' Recalibrate", false);
+      }
+    });
+
+    // Presentation Test Session Recorder Controls
+    document.getElementById('btnToggleRecording')?.addEventListener('click', () => {
+      if (sessionRecorder.recording) {
+        sessionRecorder.stop();
+        if (sessionUiState.timerId) {
+          clearInterval(sessionUiState.timerId);
+          sessionUiState.timerId = null;
+        }
+        sessionUiState.showSummary = true;
+        renderTestSessionPanel();
+        showToast('Test session stopped — summary & CSV download ready.', 'NORMAL');
+      } else {
+        if (telemetryState.mode === 'UNAVAILABLE') {
+          showToast('Connect Arduino (USB) or start Demo Mode before recording a test session.', 'WARNING');
+          return;
+        }
+        const initialStatus = telemetryState.latestAnalysis?.status || 'NORMAL';
+        sessionRecorder.start({
+          sourceMode: telemetryState.mode === 'LIVE' ? 'LIVE' : 'DEMO',
+          initialStatus
+        });
+        sessionUiState.showSummary = false;
+        if (sessionUiState.timerId) clearInterval(sessionUiState.timerId);
+        sessionUiState.timerId = setInterval(() => {
+          if (sessionRecorder.recording) {
+            renderTestSessionPanel();
+          }
+        }, 1000);
+        renderTestSessionPanel();
+        showToast('Recording test session — capturing readings, transitions & recovery.', 'NORMAL');
+      }
+    });
+
+    document.getElementById('btnMarkPumpStopped')?.addEventListener('click', () => {
+      if (!sessionRecorder.recording) return;
+      const depthCm = telemetryState.latestAnalysis?.filteredDepthCm ?? null;
+      sessionRecorder.markPumpStopped({ currentDepthCm: depthCm });
+      renderTestSessionPanel();
+      showToast('Marked Pump 2 stopped — tracking recovery time to NORMAL.', 'NORMAL');
+    });
+
+    document.getElementById('btnDownloadSessionCsv')?.addEventListener('click', () => {
+      const summary = sessionRecorder.getSummary();
+      if (!summary.hasData) {
+        showToast('No test session data recorded yet.', 'WARNING');
+        return;
+      }
+      const csv = sessionRecorder.toCsv();
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_');
+      triggerBrowserDownload(`nyc_floodguard_test_session_${stamp}.csv`, csv, 'text/csv;charset=utf-8');
+    });
+
+    document.getElementById('btnToggleSessionSummary')?.addEventListener('click', () => {
+      sessionUiState.showSummary = !sessionUiState.showSummary;
+      renderTestSessionPanel();
+    });
+
+    document.getElementById('btnCopySessionSummary')?.addEventListener('click', async () => {
+      const summary = sessionRecorder.getSummary();
+      if (!summary.hasData) return;
+      const text = [
+        'NYC FloodGuard 2.0 — Test Session Summary',
+        ...summary.classroomHighlights.map((line) => `- ${line}`)
+      ].join('\n');
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          showToast('Copied classroom summary to clipboard.', 'NORMAL');
+        } else {
+          showToast('Clipboard API unavailable in this browser.', 'WARNING');
+        }
+      } catch {
+        showToast('Could not copy summary to clipboard.', 'WARNING');
+      }
+    });
+
+    document.getElementById('btnResetSession')?.addEventListener('click', () => {
+      if (sessionUiState.timerId) {
+        clearInterval(sessionUiState.timerId);
+        sessionUiState.timerId = null;
+      }
+      sessionRecorder.reset();
+      sessionUiState.showSummary = false;
+      renderTestSessionPanel();
+      showToast('Cleared recorded test session.', 'NORMAL');
     });
 
     document.getElementById('btnToggleSimBackup')?.addEventListener('click', () => {
@@ -2911,7 +4077,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       telemetryState.lastAlertStatus = null;
       telemetryState.demoAutoAdvance = true;
       setDemoStage(0, true);
-      recalculateTelemetryAndRender();
+      recalculateTelemetryAndRender(false);
     });
 
     document.querySelectorAll('.demo-stage-btn').forEach((btn) => {
@@ -2926,7 +4092,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
     document.getElementById('btnClearChartHistory')?.addEventListener('click', () => {
       telemetryState.samples = [];
-      recalculateTelemetryAndRender();
+      recalculateTelemetryAndRender(false);
     });
 
     document.getElementById('btnClearAlertHistory')?.addEventListener('click', () => {
@@ -3016,6 +4182,8 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         if (res.status === 'ok' && res.settings) {
           prototypeSettingsState.source = 'supabase';
           prototypeSettingsState.status = 'ok';
+          prototypeSettingsState.legacyDeepBasinBlocked = false;
+          prototypeSettingsState.explicitAdminSave = true;
           prototypeSettingsState.values = {
             ...DEFAULT_PROTOTYPE_SETTINGS,
             ...res.settings
@@ -3042,15 +4210,116 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       showToast('Experimental Street Model thresholds (0.50 / 1.25 cm) populated — click Save Settings to persist.', 'NORMAL');
     });
 
-    document.getElementById('btnResetDefaultSettings')?.addEventListener('click', () => {
-      if (!isVerifiedAdmin()) return;
-      const p = PROTOTYPE_PRESETS.DEEP_BASIN_MODEL;
-      document.getElementById('cfgMountHeightCm').value = p.mountHeightCm.toFixed(2);
-      document.getElementById('cfgWarnThresholdCm').value = p.warnThresholdCm.toFixed(2);
-      document.getElementById('cfgCritThresholdCm').value = p.critThresholdCm.toFixed(2);
-      document.getElementById('cfgMinRiseRate').value = p.minRiseRateCmPerMin.toFixed(2);
-      document.getElementById('cfgBarrierThresholdCm').value = p.barrierThresholdCm.toFixed(2);
-      showToast('Deep Basin thresholds (6.0 / 12.0 cm) populated — click Save Settings to persist.', 'NORMAL');
+    // Independent Backup Float Sensor (Liyafy XSL-3508-P) Configuration & Log Controls
+    document.getElementById('floatActivationForm')?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const inputEl = document.getElementById('floatActivationHeightInput');
+      const polEl = document.getElementById('floatClosedPolaritySelect');
+      const rawVal = Number(inputEl?.value);
+      if (!Number.isFinite(rawVal) || rawVal < 0.1 || rawVal > 50) {
+        showToast('Enter a valid physical float activation height between 0.10 and 50.00 cm.', 'WARNING');
+        return;
+      }
+      floatSwitchState.activationHeightCm = Number(rawVal.toFixed(2));
+      floatSwitchState.closedMeansWater = (polEl?.value || 'water') === 'water';
+      persistFloatSwitchConfig();
+      renderBackupFloatPanel();
+      showToast(
+        `Float activation height set to ${floatSwitchState.activationHeightCm.toFixed(2)} cm. Sensor-agreement indicator enabled.`,
+        'NORMAL'
+      );
+    });
+
+    document.getElementById('floatClosedPolaritySelect')?.addEventListener('change', (e) => {
+      floatSwitchState.closedMeansWater = e.target.value === 'water';
+      persistFloatSwitchConfig();
+      renderBackupFloatPanel();
+    });
+
+    document.getElementById('btnClearFloatHeight')?.addEventListener('click', () => {
+      floatSwitchState.activationHeightCm = null;
+      persistFloatSwitchConfig();
+      renderBackupFloatPanel();
+      showToast('Float activation height cleared. Sensor-agreement indicator disabled until mounted.', 'NORMAL');
+    });
+
+    document.getElementById('btnClearFloatHistory')?.addEventListener('click', () => {
+      floatSwitchState.history = [];
+      floatSwitchState.transitionCount = 0;
+      renderBackupFloatPanel();
+    });
+
+    // 9-Step Live Presentation Walkthrough Controls
+    document.getElementById('walkthroughStepsGrid')?.addEventListener('click', (e) => {
+      const stepBtn = e.target.closest('.walkthrough-step');
+      if (!stepBtn) return;
+      const stepNum = Number(stepBtn.getAttribute('data-step'));
+      if (!Number.isFinite(stepNum)) return;
+      if (walkthroughState.manualDone.has(stepNum)) {
+        walkthroughState.manualDone.delete(stepNum);
+        walkthroughState.autoDone.delete(stepNum);
+      } else {
+        walkthroughState.manualDone.add(stepNum);
+      }
+      renderLiveWalkthroughPanel(telemetryState.latestAnalysis);
+    });
+
+    document.getElementById('btnResetWalkthrough')?.addEventListener('click', () => {
+      walkthroughState.manualDone.clear();
+      walkthroughState.autoDone.clear();
+      walkthroughState.sawFloodInLive = false;
+      renderLiveWalkthroughPanel(telemetryState.latestAnalysis);
+      showToast('Presentation walkthrough steps reset.', 'NORMAL');
+    });
+
+    // Independent Ruler vs. Ultrasonic Measurement Validation Form
+    document.getElementById('rulerValidationForm')?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const rulerInput = document.getElementById('valRulerDepthInput');
+      const noteInput = document.getElementById('valNoteInput');
+      const activeAnalysis = telemetryState.latestAnalysis;
+
+      const hasValidReading =
+        (telemetryState.mode === 'LIVE' || telemetryState.mode === 'SIMULATED') &&
+        telemetryState.streamHealth !== 'STALE' &&
+        telemetryState.streamHealth !== 'CONNECTION_LOST' &&
+        activeAnalysis &&
+        activeAnalysis.available &&
+        activeAnalysis.filteredDepthCm != null;
+
+      if (!hasValidReading) {
+        showToast('Connect your LIVE Arduino (with a valid reading) before logging a ruler comparison.', 'WARNING');
+        return;
+      }
+
+      const res = addValidationComparison(validationState, {
+        rulerCm: rulerInput?.value,
+        sensorCm: activeAnalysis.filteredDepthCm,
+        sourceMode: telemetryState.mode === 'LIVE' ? 'LIVE' : 'SIMULATED',
+        note: noteInput?.value || '',
+        timestampMs: Date.now()
+      });
+
+      if (!res.ok) {
+        showToast(res.error || 'Invalid ruler measurement.', 'WARNING');
+        return;
+      }
+
+      persistValidationLog();
+      if (rulerInput) rulerInput.value = '';
+      if (noteInput) noteInput.value = '';
+      renderMeasurementValidationPanel(activeAnalysis);
+      showToast(
+        `Logged ${res.entry.sourceMode} comparison: Ruler ${res.entry.rulerCm.toFixed(2)} cm vs Sensor ${res.entry.sensorCm.toFixed(2)} cm (Abs Error ${res.entry.absErrorCm.toFixed(2)} cm).`,
+        'NORMAL'
+      );
+    });
+
+    document.getElementById('btnClearValidationLog')?.addEventListener('click', () => {
+      validationState.entries = [];
+      persistValidationLog();
+      renderMeasurementValidationPanel(telemetryState.latestAnalysis);
+      showToast('Cleared measurement validation log.', 'NORMAL');
     });
 
     // Download Arduino GIGA R1 WiFi Sketch (.ino)

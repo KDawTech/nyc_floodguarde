@@ -34,7 +34,7 @@
         <button type="button" id="navBtnHome" class="nav-btn active" data-view="home">Home / Login</button>
         <button type="button" id="navBtnDashboard" class="nav-btn" data-view="dashboard" data-protected="true">Dashboard</button>
         <button type="button" id="navBtnRealData" class="nav-btn" data-view="realdata">NYC FloodNet Data</button>
-        <button type="button" id="navBtnAbout" class="nav-btn" data-view="about">About Project</button>
+        <button type="button" id="navBtnAbout" class="nav-btn" data-view="about">Research &amp; About</button>
       </nav>
 
       <div class="header-actions">
@@ -266,6 +266,8 @@
             <span class="meta-sep" aria-hidden="true">&middot;</span>
             <span id="dashQualityBadge" class="meta-status-text quality-text-unavailable" title="Ultrasonic signal quality status">Sensor Quality: Unavailable</span>
             <span class="meta-sep" aria-hidden="true">&middot;</span>
+            <span id="dashCalibrationBadge" class="meta-status-text quality-text-unavailable" title="Dry-road baseline calibration lock status">Calibration: Not Connected</span>
+            <span class="meta-sep" aria-hidden="true">&middot;</span>
             <span id="dashLastTimestamp" class="mono-subtext">Last reading: --</span>
           </div>
           <h1 id="dashHeading" class="section-title">NYC FloodGuard 2.0 Operations Dashboard</h1>
@@ -277,6 +279,7 @@
         <div class="connection-controls-wrap">
           <div class="connection-controls">
             <button type="button" id="btnConnectArduino" class="btn btn-cyan">Connect Arduino (USB)</button>
+            <button type="button" id="btnOpenRecalibrate" class="btn btn-outline hidden" title="Send 'c' serial command to recalibrate dry-road baseline">Recalibrate Dry Baseline (c)</button>
             <button type="button" id="btnDisconnectArduino" class="btn btn-danger hidden">Disconnect Arduino</button>
             <button type="button" id="btnToggleSimBackup" class="btn btn-outline">Start Demo Mode</button>
           </div>
@@ -286,7 +289,25 @@
         </div>
       </div>
 
-      <!-- Active Flood Status Change Warning Banner (Amber for WARNING, Red for CRITICAL) -->
+      <!-- Manual Dry-Road Recalibration Confirmation Strip (Sends 'c' over USB Serial) -->
+      <div id="recalibrateConfirmStrip" class="recalib-strip hidden" role="region" aria-label="Dry-Road Recalibration Confirmation">
+        <div class="recalib-strip-main">
+          <strong>Confirm Dry Roadway Before Recalibrating</strong>
+          <p class="recalib-strip-desc">
+            Recalibration sends the <code>c</code> command to your Arduino GIGA R1 WiFi to measure a new dry-road baseline. Never recalibrate while water is pooling on the roadway.
+          </p>
+          <label class="recalib-check-label">
+            <input type="checkbox" id="chkConfirmDryRoad" />
+            <span>I confirm the 3D-printed NYC roadway is completely dry, the drain is unobstructed, and Pump 2 is off.</span>
+          </label>
+        </div>
+        <div class="recalib-strip-actions">
+          <button type="button" id="btnConfirmRecalibrate" class="btn btn-sm btn-cyan" disabled>Send &lsquo;c&rsquo; Recalibrate</button>
+          <button type="button" id="btnCancelRecalibrate" class="btn btn-sm btn-outline">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Active Flood / Connection Lost / Stale Data Banner -->
       <div id="dashAlertBanner" class="alert-banner hidden" role="alert" aria-live="assertive">
         <div class="alert-banner-content">
           <strong id="dashAlertBannerTitle">FLOOD WARNING ACTIVE</strong>
@@ -354,6 +375,7 @@
           <div id="dashTrendMeta" class="metric-subtext">
             Waiting for timestamped measurements
           </div>
+          <div id="dashTrendAlertNote" class="metric-subtext trend-alert-note hidden"></div>
         </article>
 
         <!-- 4. Rate of Water-Level Change -->
@@ -368,24 +390,126 @@
           </div>
         </article>
 
-        <!-- 5. Early-Warning Threshold ETA -->
+        <!-- 5. Early-Warning Threshold ETA & Prediction Confidence -->
         <article class="metric-card metric-card-eta">
-          <div class="metric-label">Threshold ETA Projection</div>
+          <div class="metric-label">Real-Time Flood Prediction</div>
           <div class="eta-pair">
             <div class="eta-row">
               <span class="eta-key">Warning (<span id="dashEtaWarnThresh">0.50</span> cm)</span>
-              <strong id="dashEtaWarnVal" class="eta-val">Not available</strong>
+              <strong id="dashEtaWarnVal" class="eta-val">Insufficient Data</strong>
             </div>
             <div class="eta-row">
               <span class="eta-key">Critical (<span id="dashEtaCritThresh">1.25</span> cm)</span>
-              <strong id="dashEtaCritVal" class="eta-val">Not available</strong>
+              <strong id="dashEtaCritVal" class="eta-val">Insufficient Data</strong>
             </div>
           </div>
+          <div id="dashEtaConfidence" class="eta-confidence-line">Confidence: Insufficient Data</div>
           <div id="dashEtaNote" class="metric-subtext">
-            Shown only when sensor quality is Good and water rises reliably.
+            Trend-based extrapolation only (not a validated weather forecast).
           </div>
         </article>
       </div>
+
+      <!-- Actionable Flood Warnings & Prototype Safety Guidance (NORMAL / WARNING / CRITICAL) -->
+      <section id="actionableGuidanceCard" class="surface-card actionable-guidance-card dash-panel-gap" aria-labelledby="actionableGuidanceHeading" aria-live="polite">
+        <div class="card-header-row">
+          <div>
+            <h2 id="actionableGuidanceHeading" class="card-title">Actionable Flood Safety Recommendations</h2>
+            <p id="actionableGuidanceSubtitle" class="card-subtitle">Status-based protective guidance updated automatically from live water-depth readings.</p>
+          </div>
+          <span id="actionableGuidanceTag" class="status-tag tag-neutral">UNAVAILABLE</span>
+        </div>
+        <ul id="actionableGuidanceList" class="guidance-list">
+          <li>Connect your Arduino GIGA R1 WiFi over USB to receive live status-based guidance, or start Demo Mode for a simulated walkthrough.</li>
+          <li>Verify live NYC weather conditions and keep nearby storm-drain grates clear of leaves and debris.</li>
+        </ul>
+        <div class="guidance-disclaimer">
+          <strong>Prototype Safety Guidance Only:</strong> Recommendations are educational guidance for demonstration and do <strong>not</strong> constitute an official NYC Emergency Management (Notify NYC) or National Weather Service alert.
+        </div>
+      </section>
+
+      <!-- Independent Backup Float Sensor Card (Liyafy XSL-3508-P — Separate from Ultrasonic Telemetry) -->
+      <section id="backupFloatPanel" class="surface-card float-sensor-panel dash-panel-gap" aria-labelledby="backupFloatHeading">
+        <div class="card-header-row" style="margin-bottom:12px;">
+          <div>
+            <div class="session-title-row">
+              <h2 id="backupFloatHeading" class="card-title">Backup Float Sensor</h2>
+              <span class="mono-subtext">Liyafy XSL-3508-P &middot; Secondary Contact Switch</span>
+            </div>
+            <p class="card-subtitle">
+              Displayed independently from HC-SR04 ultrasonic depth. Passed electrical testing only &mdash; does <strong>not</strong> automatically trigger WARNING or CRITICAL flood alerts.
+            </p>
+          </div>
+          <span id="floatValidationBadge" class="status-tag tag-neutral">Electrical Test Only (Not Mounted)</span>
+        </div>
+
+        <div class="float-panel-grid">
+          <!-- Column 1: Live OPEN / CLOSED Electrical State -->
+          <div id="floatStateCard" class="float-state-box float-state-awaiting">
+            <div class="metric-label">Live Switch State</div>
+            <div id="floatSwitchStateVal" class="float-state-value">AWAITING DATA</div>
+            <div id="floatSwitchMetaLine" class="metric-subtext mono-text">
+              Waiting for <code>Float Switch: OPEN</code> or <code>Float Switch: CLOSED</code> over USB Serial
+            </div>
+            <div class="float-honest-note">
+              Independent sensor readout &mdash; never alters ultrasonic depth or triggers CRITICAL alerts.
+            </div>
+          </div>
+
+          <!-- Column 2: Configurable Activation Height & Sensor Agreement Indicator -->
+          <div class="float-agreement-box">
+            <div class="float-agreement-head">
+              <span class="metric-label">Ultrasonic &harr; Float Agreement</span>
+              <span id="floatAgreementTag" class="status-tag tag-neutral">Not Configured</span>
+            </div>
+            <p id="floatAgreementDetail" class="float-agreement-detail">
+              Configure the float switch&rsquo;s measured physical activation height (cm) after mounting to enable agreement checks with the HC-SR04 ultrasonic sensor.
+            </p>
+            <form id="floatActivationForm" class="float-config-row" novalidate>
+              <label for="floatActivationHeightInput" class="sr-only">Physical activation height in cm</label>
+              <input
+                type="number"
+                id="floatActivationHeightInput"
+                class="form-control mono-input float-height-input"
+                min="0.10"
+                max="50"
+                step="0.05"
+                placeholder="Height (cm)"
+              />
+              <label for="floatClosedPolaritySelect" class="sr-only">Switch polarity when closed</label>
+              <select id="floatClosedPolaritySelect" class="form-control float-polarity-select">
+                <option value="water">CLOSED = Water at/above height</option>
+                <option value="dry">CLOSED = Dry / below height</option>
+              </select>
+              <button type="submit" id="btnSaveFloatHeight" class="btn btn-sm btn-primary">Set Height</button>
+              <button type="button" id="btnClearFloatHeight" class="btn btn-sm btn-outline" disabled>Unset</button>
+            </form>
+          </div>
+
+          <!-- Column 3: Timestamped Float-Switch State Change Log -->
+          <div class="float-log-box">
+            <div class="float-agreement-head" style="margin-bottom:6px;">
+              <span class="metric-label">State Change Log (<span id="floatTransitionCountVal">0</span> changes)</span>
+              <button type="button" id="btnClearFloatHistory" class="btn btn-sm btn-outline">Clear</button>
+            </div>
+            <div id="floatHistoryEmpty" class="float-log-empty">
+              No float-switch messages received yet.
+            </div>
+            <div id="floatHistoryWrap" class="float-log-scroll hidden">
+              <table class="data-table compact-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>State Change</th>
+                    <th class="num-col">Ultrasonic</th>
+                  </tr>
+                </thead>
+                <tbody id="floatHistoryTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <!-- Real-Time Water-Level History Line Chart -->
       <section class="surface-card chart-section" aria-labelledby="dashChartHeading">
@@ -410,6 +534,93 @@
             <p>Click <strong>Connect Arduino (USB)</strong> for live HC-SR04 readings or <strong>Start Demo Mode</strong> for a 6-stage flood walkthrough.</p>
           </div>
         </div>
+      </section>
+
+      <!-- Presentation Test Session Recorder & CSV Export -->
+      <section id="testSessionPanel" class="surface-card session-recorder-card dash-panel-gap" aria-labelledby="testSessionHeading">
+        <div class="card-header-row" style="margin-bottom:12px;">
+          <div>
+            <div class="session-title-row">
+              <h2 id="testSessionHeading" class="card-title">Record Test Session</h2>
+              <span id="sessionStatusTag" class="status-tag tag-neutral">Ready</span>
+              <span id="sessionTimerVal" class="mono-text session-timer">00:00</span>
+            </div>
+            <p class="card-subtitle">
+              Capture timestamped readings, min/max depth, alert transitions, time in each flood status, and drainage recovery after Pump 2 stops.
+            </p>
+          </div>
+          <div class="session-controls">
+            <button type="button" id="btnToggleRecording" class="btn btn-sm btn-cyan">Record Test Session</button>
+            <button type="button" id="btnMarkPumpStopped" class="btn btn-sm btn-outline hidden">Mark Pump 2 Stopped</button>
+            <button type="button" id="btnDownloadSessionCsv" class="btn btn-sm btn-primary" disabled>Download CSV</button>
+            <button type="button" id="btnToggleSessionSummary" class="btn btn-sm btn-outline" disabled>Classroom Summary</button>
+            <button type="button" id="btnResetSession" class="btn btn-sm btn-outline" disabled>Reset</button>
+          </div>
+        </div>
+
+        <div class="session-metrics-strip">
+          <div class="session-stat">
+            <span class="session-stat-label">Samples Captured</span>
+            <strong id="sessionSampleCountVal" class="mono-val">0</strong>
+          </div>
+          <div class="session-stat">
+            <span class="session-stat-label">Min / Max Water Depth</span>
+            <strong id="sessionMinMaxVal" class="mono-val">-- / -- cm</strong>
+          </div>
+          <div class="session-stat">
+            <span class="session-stat-label">Status Time (N / W / C)</span>
+            <strong id="sessionStatusTimesVal" class="mono-val">0.0s / 0.0s / 0.0s</strong>
+          </div>
+          <div class="session-stat">
+            <span class="session-stat-label">Alert Transitions</span>
+            <strong id="sessionTransitionsVal" class="mono-val">0</strong>
+          </div>
+          <div class="session-stat">
+            <span class="session-stat-label">Drainage Recovery</span>
+            <strong id="sessionRecoveryVal" class="session-recovery-val">Not recorded yet</strong>
+          </div>
+        </div>
+
+        <!-- Optional Classroom Demonstration Summary Card -->
+        <div id="sessionSummaryCard" class="session-summary-box hidden" aria-live="polite">
+          <div class="session-summary-head">
+            <strong>Classroom Presentation Summary</strong>
+            <button type="button" id="btnCopySessionSummary" class="btn btn-sm btn-outline">Copy Summary</button>
+          </div>
+          <ul id="sessionSummaryList" class="intel-list"></ul>
+        </div>
+      </section>
+
+      <!-- 9-Step Live Presentation Walkthrough Guide (Works in LIVE Arduino Mode; SIMULATED Kept Separate) -->
+      <section id="liveDemoGuidePanel" class="surface-card dash-panel-gap" aria-labelledby="liveDemoGuideHeading">
+        <details class="demo-walkthrough-details">
+          <summary>
+            <div>
+              <h2 id="liveDemoGuideHeading" class="card-title">9-Step Live Presentation Walkthrough</h2>
+              <p class="card-subtitle">Follow with real Arduino readings in <strong>LIVE MODE</strong> (click to expand/collapse; steps auto-highlight as live states occur, or click any step to check it off).</p>
+            </div>
+            <div class="filter-group">
+              <span id="walkthroughModeBadge" class="status-tag tag-neutral">Awaiting LIVE Arduino</span>
+              <span class="btn btn-sm btn-outline">Toggle Checklist</span>
+            </div>
+          </summary>
+
+          <div class="walkthrough-steps-grid" id="walkthroughStepsGrid" role="list">
+            <button type="button" class="walkthrough-step" data-step="1" role="listitem"><span class="walkthrough-step-num">1</span><span>Start with dry street and <strong>NORMAL</strong> status (&lt; 0.50 cm).</span></button>
+            <button type="button" class="walkthrough-step" data-step="2" role="listitem"><span class="walkthrough-step-num">2</span><span>Turn on <strong>Pump 2</strong> to simulate rainfall onto the roadway.</span></button>
+            <button type="button" class="walkthrough-step" data-step="3" role="listitem"><span class="walkthrough-step-num">3</span><span>Demonstrate an <strong>open storm drain</strong> draining water into the reservoir.</span></button>
+            <button type="button" class="walkthrough-step" data-step="4" role="listitem"><span class="walkthrough-step-num">4</span><span>Insert the removable blockage to <strong>block the storm drain</strong>.</span></button>
+            <button type="button" class="walkthrough-step" data-step="5" role="listitem"><span class="walkthrough-step-num">5</span><span>Show <strong>water rising</strong> on the live chart and trend indicator.</span></button>
+            <button type="button" class="walkthrough-step" data-step="6" role="listitem"><span class="walkthrough-step-num">6</span><span>Display live <strong>WARNING</strong> (&ge; 0.50 cm) and <strong>CRITICAL</strong> (&ge; 1.25 cm) alerts.</span></button>
+            <button type="button" class="walkthrough-step" data-step="7" role="listitem"><span class="walkthrough-step-num">7</span><span>Show <strong>trend-based ETA prediction</strong> when sufficient valid data exists.</span></button>
+            <button type="button" class="walkthrough-step" data-step="8" role="listitem"><span class="walkthrough-step-num">8</span><span>Highlight <strong>Actionable Flood Safety Recommendations</strong> &amp; Risk Intelligence.</span></button>
+            <button type="button" class="walkthrough-step" data-step="9" role="listitem"><span class="walkthrough-step-num">9</span><span><strong>Reopen the drain</strong> to show water receding (Falling Water &rarr; Recovery).</span></button>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;">
+            <span class="mono-subtext">LIVE Arduino telemetry is never mixed with SIMULATED Demo Mode data.</span>
+            <button type="button" id="btnResetWalkthrough" class="btn btn-sm btn-outline">Reset Steps</button>
+          </div>
+        </details>
       </section>
 
       <!-- Operational Row 1: FloodGuard Risk Intelligence + Live NYC Weather (Open-Meteo) -->
@@ -607,6 +818,76 @@
         </section>
       </div>
 
+      <!-- Measurement Validation Panel: Independent Ruler vs. Ultrasonic Comparison -->
+      <section id="measurementValidationPanel" class="surface-card dash-panel-gap" aria-labelledby="validationHeading">
+        <div class="card-header-row" style="margin-bottom:12px;">
+          <div>
+            <h2 id="validationHeading" class="card-title">Measurement Validation (Ruler vs. Ultrasonic Sensor)</h2>
+            <p class="card-subtitle">Enter an independent physical ruler depth (cm) to compare against the live HC-SR04 reading and measure real absolute error.</p>
+          </div>
+          <span id="validationStatusBadge" class="status-tag tag-neutral">Not Scientifically Validated</span>
+        </div>
+
+        <div class="validation-top-grid">
+          <form id="rulerValidationForm" class="validation-form-row" novalidate>
+            <div class="form-group" style="margin-bottom:0;min-width:140px;">
+              <label for="valRulerDepthInput" class="form-label">Ruler Depth (cm)</label>
+              <input type="number" id="valRulerDepthInput" class="form-control mono-input" min="0" max="200" step="0.05" placeholder="e.g. 0.80" required />
+            </div>
+            <div class="form-group" style="margin-bottom:0;min-width:155px;">
+              <label for="valSensorReadoutPreview" class="form-label">Active Sensor (cm)</label>
+              <input type="text" id="valSensorReadoutPreview" class="form-control mono-input" value="Connect LIVE Arduino" readonly />
+            </div>
+            <div class="form-group" style="margin-bottom:0;flex:1;min-width:140px;">
+              <label for="valNoteInput" class="form-label">Trial Note (optional)</label>
+              <input type="text" id="valNoteInput" class="form-control" maxlength="120" placeholder="e.g. calm / Pump 2 on" />
+            </div>
+            <button type="submit" id="btnLogRulerComparison" class="btn btn-sm btn-primary">Record Comparison</button>
+            <button type="button" id="btnClearValidationLog" class="btn btn-sm btn-outline">Clear</button>
+          </form>
+
+          <div class="validation-stats-grid">
+            <div class="session-stat">
+              <span class="session-stat-label">LIVE Trials</span>
+              <strong id="valLiveCount" class="mono-val">0</strong>
+            </div>
+            <div class="session-stat">
+              <span class="session-stat-label">Mean Abs Error</span>
+              <strong id="valMaeCm" class="mono-val">-- cm</strong>
+            </div>
+            <div class="session-stat">
+              <span class="session-stat-label">Max Abs Error</span>
+              <strong id="valMaxErrCm" class="mono-val">-- cm</strong>
+            </div>
+            <div class="session-stat">
+              <span class="session-stat-label">Mean Bias</span>
+              <strong id="valBiasCm" class="mono-val">-- cm</strong>
+            </div>
+          </div>
+        </div>
+
+        <p id="validationSummaryNote" class="panel-disclaimer" style="border-top:none;padding-top:0;margin-bottom:10px;">
+          No live ruler-vs-sensor comparisons recorded yet. Do not claim scientific validation until actual physical ruler measurements are recorded.
+        </p>
+
+        <div id="validationTableWrap" class="table-responsive hidden">
+          <table class="data-table compact-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Source</th>
+                <th class="num-col">Ruler (cm)</th>
+                <th class="num-col">Sensor (cm)</th>
+                <th class="num-col">Signed Diff</th>
+                <th class="num-col">Abs Error</th>
+                <th>Note</th>
+              </tr>
+            </thead>
+            <tbody id="validationTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- Operational Row 3: Hardware Diagnostics & Supabase RLS Threshold Configuration -->
       <div class="dash-secondary-grid">
         <!-- Hardware Signals & Honest Feature Boundaries -->
@@ -628,23 +909,31 @@
               <strong id="hwSensorQualityVal" class="mono-val">Unavailable</strong>
             </div>
             <div class="spec-row">
-              <span class="spec-label">Filtered Distance to Water</span>
+              <span class="spec-label">Calibration Status</span>
+              <strong id="hwCalibStatusVal" class="mono-val">Not connected</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Locked Calibrated Baseline</span>
+              <strong id="hwMountHeightVal" class="mono-val">14.39 cm (default)</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Current Sensor Distance</span>
               <strong id="hwFilteredDistanceVal" class="mono-val">--</strong>
             </div>
             <div class="spec-row">
-              <span class="spec-label">Latest Raw Distance</span>
+              <span class="spec-label">Latest Raw Distance &amp; Flag</span>
               <strong id="hwDistanceVal" class="mono-val">--</strong>
             </div>
             <div class="spec-row">
-              <span class="spec-label">Dry-Road Calibration Height</span>
-              <strong id="hwMountHeightVal" class="mono-val">14.39 cm</strong>
+              <span class="spec-label">Suspicious Readings Flagged</span>
+              <strong id="hwSuspiciousCountVal" class="mono-val">0</strong>
             </div>
             <div class="spec-row">
               <span class="spec-label">Last Raw Serial Line</span>
               <span id="hwRawSerialLine" class="spec-note mono-text">--</span>
             </div>
             <div class="spec-row">
-              <span class="spec-label">Low / High Float Switches</span>
+              <span class="spec-label">Backup Float Sensor (XSL-3508-P)</span>
               <strong id="hwFloatStatusVal" class="mono-val">Not connected</strong>
             </div>
             <div class="spec-row">
@@ -700,11 +989,10 @@
 
             <div id="adminSaveControls" class="btn-row hidden">
               <button type="submit" id="btnSaveAdminSettings" class="btn btn-primary">Save Settings to Supabase</button>
-              <button type="button" id="btnPresetStreetModel" class="btn btn-outline">Street Model (0.50 / 1.25)</button>
-              <button type="button" id="btnResetDefaultSettings" class="btn btn-outline">Deep Basin (6.0 / 12.0)</button>
+              <button type="button" id="btnPresetStreetModel" class="btn btn-outline">Experimental Defaults (0.50 / 1.25 cm)</button>
             </div>
             <p id="regularUserSettingsNote" class="form-footnote" style="margin-top:8px;">
-              Only database-verified Administrators can save threshold changes to Supabase (enforced by Row Level Security). Live Arduino text packets automatically use the sensor's dry-road baseline.
+              Only database-verified Administrators can save threshold changes to Supabase (enforced by Row Level Security). Experimental street-model thresholds (WARNING &ge; 0.50 cm, CRITICAL &ge; 1.25 cm) are preserved and never auto-switched to deep-basin thresholds.
             </p>
           </form>
         </section>
@@ -886,90 +1174,396 @@
     </section>
 
     <!-- ==================================================================
-         SECTION 4: ABOUT PROJECT (#view-about)
+         SECTION 4: RESEARCH, ENGINEERING & ABOUT PROJECT (#view-about)
          ================================================================== -->
     <section id="view-about" class="view-section" aria-labelledby="aboutHeading">
       <div class="section-header">
         <div>
-          <p class="eyebrow-text" style="color:var(--cyan-600);">Hardware &amp; Engineering Architecture</p>
-          <h1 id="aboutHeading" class="section-title">About NYC FloodGuard</h1>
+          <p class="eyebrow-text" style="color:var(--cyan-600);">Research, Sensor Engineering &amp; Architecture</p>
+          <h1 id="aboutHeading" class="section-title">About NYC FloodGuard 2.0</h1>
           <p class="section-subtitle">
-            How the physical tabletop prototype works, why it improves on passive flood logging, and how to safely connect your Arduino GIGA R1 WiFi.
+            Research-backed causes of New York City flooding, honest ultrasonic sensor accuracy limits, three-layer early-warning architecture, and concise answers to faculty review questions.
           </p>
         </div>
         <button type="button" id="btnDownloadArduinoSketch" class="btn btn-primary">Download Arduino Firmware (.ino)</button>
       </div>
 
-      <!-- How NYC FloodGuard Improves on NYC FloodNet -->
-      <div class="about-grid-2" style="margin-bottom:20px;">
-        <article class="surface-card">
-          <h2 class="card-title" style="margin-bottom:8px;">What Makes NYC FloodGuard Different</h2>
-          <p class="card-subtitle" style="margin-bottom:12px;">
-            NYC FloodNet provides invaluable historical street flood observations across New York City. NYC FloodGuard builds on that inspiration by focusing on <strong>active early warning and drainage feedback</strong>:
-          </p>
-          <ul class="clean-list">
-            <li><strong>Rising-Water Velocity:</strong> Computes statistically validated rate of change (<code>cm/min</code>) over a rolling window instead of reacting to isolated ripples.</li>
-            <li><strong>Conservative Early-Warning ETA:</strong> Projects estimated time to Warning and Critical thresholds only when sensor quality is Good and water rises reliably; otherwise displays <em>Not available</em>.</li>
-            <li><strong>Falling-Water Tracking:</strong> Detects statistically reliable <strong>Falling Water</strong> trends honestly without assuming drainage-pump operation before pump telemetry exists.</li>
-            <li><strong>Side-by-Side Real-World Context:</strong> Keeps prototype measurements clearly separated from authentic historical NYC FloodNet records.</li>
-          </ul>
-        </article>
+      <!-- Presentation Quick-Jump Bar -->
+      <nav class="about-jump-nav" aria-label="Research and About Sections">
+        <a href="#sec-why-nyc-floods" class="about-jump-link">1. Why NYC Floods</a>
+        <a href="#sec-floodguard-vs-floodnet" class="about-jump-link">2. FloodGuard vs. FloodNet</a>
+        <a href="#sec-sensor-accuracy" class="about-jump-link">3. Sensor Accuracy &amp; Noise</a>
+        <a href="#sec-early-warning" class="about-jump-link">4. Early-Warning Layers</a>
+        <a href="#sec-professor-qa" class="about-jump-link">5. Professor&rsquo;s Q&amp;A (10)</a>
+        <a href="#sec-future-improvements" class="about-jump-link">6. Future Improvements</a>
+        <a href="#sec-hardware-overview" class="about-jump-link">7. Hardware &amp; Status</a>
+      </nav>
 
-        <article class="surface-card">
-          <h2 class="card-title" style="margin-bottom:8px;">How Flood Detection &amp; Early Warning Work</h2>
-          <div class="formula-box">
-            Filtered Water Depth (cm) = Sensor Mounting Height (cm) &minus; Filtered Distance (cm)
+      <!-- ================================================================
+           1. WHY NYC FLOODS (RESEARCH-BACKED)
+           ================================================================ -->
+      <section id="sec-why-nyc-floods" class="surface-card research-section" aria-labelledby="whyNycFloodsHeading">
+        <div class="card-header-row" style="margin-bottom:6px;">
+          <div>
+            <h2 id="whyNycFloodsHeading" class="card-title">1. Why New York City Floods</h2>
+            <p class="card-subtitle">Understanding the physical drivers of urban and coastal flooding across NYC&rsquo;s 520 miles of coastline and 7,500-mile sewer network.</p>
           </div>
-          <ul class="clean-list">
-            <li><strong>Step 1 &mdash; Physical Range Validation:</strong> Distances below 2.0 cm (HC-SR04 blind zone) or beyond mounting height + dry tolerance are flagged <strong>Out of Range</strong> and never turned into 0.0 cm depth.</li>
-            <li><strong>Step 2 &mdash; Spike Rejection &amp; Causal Median:</strong> On-board 5-ping median bursts plus browser-side isolated spike rejection and causal trailing median filtering suppress single-frame echo glitches.</li>
-            <li><strong>Step 3 &mdash; Statistical Trend &amp; Quality Gating:</strong> Linear regression evaluates slope (<code>cm/min</code>), <code>R&sup2;</code>, and <code>t</code>-statistic so only consistent trends report <strong>Rising Water</strong> or <strong>Falling Water</strong>.</li>
-            <li><strong>Step 4 &mdash; Mathematical Projection:</strong> When sensor quality is <strong>Good</strong> and rising reliably, <code>ETA = (Threshold &minus; Depth) / Rise Rate</code>. This is a mathematical projection, not a guaranteed weather forecast.</li>
-          </ul>
-        </article>
-      </div>
+          <span class="status-tag tag-info">Research-Backed Context</span>
+        </div>
 
-      <!-- Physical Prototype Hardware Overview -->
-      <section class="surface-card" style="margin-bottom:20px;">
-        <h2 class="card-title" style="margin-bottom:12px;">Physical Prototype Hardware Components</h2>
+        <div class="principle-callout">
+          <strong>Core Physical Principle:</strong> Flooding occurs whenever <strong>water enters an area faster than it can drain, infiltrate, or escape</strong>. In a dense coastal city like New York, that imbalance can come from extreme rainfall from above, storm surge from the harbor, or infrastructure failure underground.
+        </div>
+
+        <div class="causes-grid">
+          <article class="cause-card">
+            <span class="cause-num">CAUSE 01</span>
+            <h3>Heavy Rainfall Exceeding Drainage Capacity</h3>
+            <p>NYC&rsquo;s combined and separate sewer pipes are engineered for routine storms. Sudden, intense &ldquo;cloudburst&rdquo; downpours deliver rainwater faster than underground pipes can convey it, causing rapid street and basement flooding.</p>
+          </article>
+
+          <article class="cause-card">
+            <span class="cause-num">CAUSE 02</span>
+            <h3>Blocked Storm Drains &amp; Debris</h3>
+            <p>NYC DEP maintains over 150,000 street catch basins. When leaves, trash, or sediment mat over a catch-basin grate, surface runoff cannot enter the sewer, creating deep local ponding even during moderate rain.</p>
+          </article>
+
+          <article class="cause-card">
+            <span class="cause-num">CAUSE 03</span>
+            <h3>Low-Lying Neighborhoods &amp; Impervious Pavement</h3>
+            <p>Asphalt streets, concrete sidewalks, and dense rooftops block natural soil infiltration. Runoff concentrates rapidly in low-lying neighborhoods, underpasses, and below-grade cellar entrances.</p>
+          </article>
+
+          <article class="cause-card">
+            <span class="cause-num">CAUSE 04</span>
+            <h3>Coastal Storm Surge &amp; High Tides</h3>
+            <p>Onshore winds during tropical or coastal storms push ocean and harbor water inland, especially at high tide. Elevated harbor levels also block sewer outfalls from draining street runoff.</p>
+          </article>
+
+          <article class="cause-card">
+            <span class="cause-num">CAUSE 05</span>
+            <h3>Climate-Related Increases in Flood Risk</h3>
+            <p>A warmer atmosphere holds more moisture, increasing the frequency of extreme short-duration cloudburst downpours, while long-term sea-level rise raises baseline high tides and storm-surge reach (alongside localized water-main or sewer failures).</p>
+          </article>
+        </div>
+
+        <div class="comparison-split">
+          <article class="compare-box compare-box-coastal">
+            <h3>Coastal Surge Example: Hurricane Sandy (October 2012)</h3>
+            <p>
+              Hurricane Sandy illustrates <strong>coastal flood risk</strong>. Its massive wind field coincided with peak high tide, driving a historic saltwater storm surge that inundated roughly 50 square miles (~17% of NYC&rsquo;s land mass), flooded subway tunnels and power substations, and exposed the vulnerability of NYC&rsquo;s low-lying shoreline.
+            </p>
+          </article>
+
+          <article class="compare-box compare-box-pluvial">
+            <h3>What Our Tabletop Model Demonstrates: Blocked-Drain Flooding</h3>
+            <p>
+              NYC FloodGuard&rsquo;s 3D-printed street, catch basin, circulation pump, and removable blockage demonstrate <strong>rainfall-related blocked-drain (pluvial) flooding</strong>. It isolates how quickly street water climbs from dry road into WARNING and CRITICAL depths when storm-drain outflow is obstructed &mdash; and how restoring drain flow allows water to recede.
+            </p>
+          </article>
+        </div>
+
+        <div class="references-box">
+          <div class="references-title">Authoritative Research References (NYC DEP, NYC Emergency Management, FloodNet &amp; NWS)</div>
+          <ol class="references-list">
+            <li><a href="https://www.nyc.gov/site/dep/environment/flood-prevention.page" target="_blank" rel="noopener noreferrer">NYC DEP &mdash; Flood Prevention &amp; Catch Basin Maintenance</a> (150,000+ storm drains &amp; street drainage)</li>
+            <li><a href="https://www.nyc.gov/site/dep/environment/cloudburst.page" target="_blank" rel="noopener noreferrer">NYC DEP &mdash; Cloudburst Management Program</a> (intense short-duration rainfall exceeding sewer capacity)</li>
+            <li><a href="https://www.nyc.gov/site/em/ready/flooding.page" target="_blank" rel="noopener noreferrer">NYC Emergency Management &mdash; Flooding Preparedness Guide</a> (flash flooding, basements &amp; safety)</li>
+            <li><a href="https://www.nyc.gov/site/em/ready/coastal-storms-hurricanes.page" target="_blank" rel="noopener noreferrer">NYC Emergency Management &mdash; Coastal Storms &amp; Hurricanes</a> (storm surge zones &amp; coastal hazards)</li>
+            <li><a href="https://www.floodnet.nyc/" target="_blank" rel="noopener noreferrer">NYC FloodNet &mdash; Real-Time Street Flood Sensor Network</a> (NYU / CUNY / NYC ultrasonic street sensors)</li>
+            <li><a href="https://data.cityofnewyork.us/Environment/FloodNet-Street-Flooding-Events-Measured-by-FloodN/aq7i-eu5q" target="_blank" rel="noopener noreferrer">NYC Open Data &mdash; FloodNet Street Flooding Events Dataset</a> (official historical records used in this app)</li>
+            <li><a href="https://www.weather.gov/safety/flood" target="_blank" rel="noopener noreferrer">National Weather Service (NWS) &mdash; Flood Safety &amp; Flash Flooding</a> (urban runoff &amp; pedestrian/driver hazards)</li>
+            <li><a href="https://www.weather.gov/okx/hurricanesandy5year" target="_blank" rel="noopener noreferrer">NWS New York, NY (OKX) &mdash; Hurricane Sandy Historical Review</a> (2012 coastal storm surge impact)</li>
+            <li><a href="https://www.weather.gov/okx/coastal_flooding" target="_blank" rel="noopener noreferrer">NWS New York, NY (OKX) &mdash; Coastal Flooding &amp; High-Tide Reference</a> (tidal and surge water levels)</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           2. NYC FLOODGUARD VS. NYC FLOODNET (HONEST COMPARISON)
+           ================================================================ -->
+      <section id="sec-floodguard-vs-floodnet" class="surface-card research-section" aria-labelledby="vsFloodNetHeading">
+        <div class="card-header-row" style="margin-bottom:10px;">
+          <div>
+            <h2 id="vsFloodNetHeading" class="card-title">2. NYC FloodGuard 2.0 vs. NYC FloodNet</h2>
+            <p class="card-subtitle">How our student prototype builds on the inspiration of NYC FloodNet without overstating accuracy or operational readiness.</p>
+          </div>
+          <span class="status-tag tag-info">Honest Comparison</span>
+        </div>
+
+        <div class="comparison-split">
+          <article class="compare-box compare-box-coastal">
+            <h3>What NYC FloodNet Provides (Operational City Network)</h3>
+            <ul class="clean-list">
+              <li><strong>Citywide Deployment:</strong> Real, weatherproof ultrasonic flood sensors installed across all five NYC boroughs by NYU, CUNY, NYCEM, and NYC Mayor&rsquo;s Office of Climate &amp; Environmental Justice.</li>
+              <li><strong>Public Historical Record:</strong> Publishes authentic, long-term street flood event records directly to NYC Open Data (integrated separately in our <em>NYC FloodNet Data</em> tab).</li>
+              <li><strong>Agency Situational Awareness:</strong> Feeds verified street-level inundation data into city emergency planning, research, and post-storm analysis.</li>
+            </ul>
+          </article>
+
+          <article class="compare-box compare-box-pluvial">
+            <h3>What NYC FloodGuard 2.0 Demonstrates (Student Prototype)</h3>
+            <ul class="clean-list">
+              <li><strong>Local Active Early-Warning Concept:</strong> Computes rolling-window water rise rate (<code>cm/min</code>), trend direction, and short-term threshold ETAs when measurements are reliable.</li>
+              <li><strong>Weather + Rule-Based Resident Guidance:</strong> Pairs local tabletop readings with live Open-Meteo NYC rainfall forecasts and status-based protective actions (NORMAL / WARNING / CRITICAL).</li>
+              <li><strong>Interactive Blocked-Drain Education:</strong> Demonstrates how a clogged catch basin causes rapid ponding and how clearing debris restores drainage in real time.</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="inline-notice notice-warn" style="margin-bottom:0;">
+          <strong>Scope Honesty:</strong> NYC FloodGuard 2.0 is a tabletop classroom engineering prototype. It does <strong>not</strong> claim superior measurement accuracy, official municipal deployment, or scientifically validated citywide flood-prediction performance compared to NYC FloodNet.
+        </div>
+      </section>
+
+      <!-- ================================================================
+           3. SENSOR ACCURACY, SPLASHING, WAVES & VIBRATION
+           ================================================================ -->
+      <section id="sec-sensor-accuracy" class="surface-card research-section" aria-labelledby="sensorAccuracyHeading">
+        <div class="card-header-row" style="margin-bottom:8px;">
+          <div>
+            <h2 id="sensorAccuracyHeading" class="card-title">3. Sensor Accuracy, Surface Splashing &amp; Physical Limitations</h2>
+            <p class="card-subtitle">Engineering response to: &ldquo;What happens when water splashes, waves move, or the sensor shakes?&rdquo;</p>
+          </div>
+          <span class="status-tag tag-warn">Honest Error Boundaries</span>
+        </div>
+
+        <div class="inline-notice notice-warn" style="margin-bottom:14px;">
+          <strong>Important Engineering Honesty:</strong> The HC-SR04 is an educational, low-cost ultrasonic distance sensor &mdash; it is <strong>not perfectly accurate</strong> and is sensitive to wave turbulence, vibration, and acoustic reflections. NYC FloodGuard combines mechanical stabilization with multi-stage filtering and explicit uncertainty reporting rather than pretending every echo is exact.
+        </div>
+
+        <div class="hardware-grid">
+          <article class="hw-item">
+            <h3>Seven-Sample Median Filtering</h3>
+            <p>Each Arduino measurement cycle collects a burst of <strong>7 ultrasonic pings</strong>, sorts them, and takes the middle (median) value. A single splash spike or dropped echo falls at the extreme high or low end of the burst and is rejected before depth is reported.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>Three-Reading Alert Confirmation</h3>
+            <p>To prevent a momentary ripple or passing wave crest from triggering a false alarm, the firmware requires <strong>3 consecutive confirmed readings</strong> above the WARNING (<code>0.50 cm</code>) or CRITICAL (<code>1.25 cm</code>) threshold before escalating the official alert state.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>Locked Dry-Road Calibration</h3>
+            <p>Depth is computed from a calibrated dry street reference (<code>Depth = Dry Baseline &minus; Distance</code>). The dashboard locks that dry-road baseline so rising water never silently shifts zero; recalibration (serial command <code>c</code>) requires explicit user confirmation that the street is dry.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>Sensor Mounting &amp; Vibration</h3>
+            <p>Because even a 3&ndash;5 mm shift in riser height directly biases water depth, the ultrasonic mount must be rigidly secured to the street basin. Mechanical shaking introduces distance jitter that degrades trend confidence and triggers <em>Unstable</em> sensor quality warnings.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>Ultrasonic Reflections &amp; False Readings</h3>
+            <p>Steep waves, pump turbulence, foam, or nearby 3D-printed building walls can scatter or reflect the 40 kHz sound cone, creating multipath spikes or missed echoes. Readings inside the ~2 cm blind zone or outside basin geometry are flagged <strong>Out of Range</strong> or <strong>Suspicious</strong> &mdash; never silently treated as <code>0.00 cm</code> dry road.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>Independent Validation Is Required</h3>
+            <p>A sensor cannot prove its own accuracy. Quantifying true bias and uncertainty (e.g., &plusmn;mm error across calm vs. splashing water) requires comparing ultrasonic outputs against an <strong>independent physical reference</strong> such as a calibrated millimeter ruler, graduated gauge, or contact level sensor across repeated trials.</p>
+          </article>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           4. EARLY-WARNING CAPABILITY (3 LAYERS + HONEST SCOPE)
+           ================================================================ -->
+      <section id="sec-early-warning" class="surface-card research-section" aria-labelledby="earlyWarningHeading">
+        <div class="card-header-row" style="margin-bottom:10px;">
+          <div>
+            <h2 id="earlyWarningHeading" class="card-title">4. Early-Warning Capability: Three Distinct Layers</h2>
+            <p class="card-subtitle">Separating current flood detection, rising-water rate tracking, and pre-flood rainfall forecasting &mdash; without overclaiming exact arrival times.</p>
+          </div>
+          <span class="status-tag tag-info">Scope Transparency</span>
+        </div>
+
+        <div class="layers-grid-3">
+          <article class="layer-card">
+            <div class="layer-badge-row">
+              <span class="layer-step">LAYER 1</span>
+              <span class="status-tag tag-normal">Physically Tested</span>
+            </div>
+            <h3>Detecting Current Flooding</h3>
+            <p>Measures standing water depth on the 3D-printed street model via Arduino GIGA R1 WiFi + HC-SR04 and confirms <strong>NORMAL</strong> (&lt;0.50 cm), <strong>WARNING</strong> (0.50&ndash;1.24 cm), or <strong>CRITICAL</strong> (&ge;1.25 cm) status using 7-sample median filtering and 3-reading confirmation. Verified physically up to 2.42 cm CRITICAL.</p>
+          </article>
+
+          <article class="layer-card">
+            <div class="layer-badge-row">
+              <span class="layer-step">LAYER 2</span>
+              <span class="status-tag tag-warn">Software-Tested / Experimental</span>
+            </div>
+            <h3>Detecting Rapidly Rising Water</h3>
+            <p>Evaluates rate of change (<code>cm/min</code>) over a rolling time window using linear regression and statistical quality gating. Reports <strong>Rising Water</strong>, rapid-rise alerts, or suspected blocked drainage only when measurements are consistent; reports <strong>Uncertain</strong> when noisy.</p>
+          </article>
+
+          <article class="layer-card">
+            <div class="layer-badge-row">
+              <span class="layer-step">LAYER 3</span>
+              <span class="status-tag tag-info">Software-Tested Context</span>
+            </div>
+            <h3>Forecasting Rainfall Risk Before Flooding</h3>
+            <p>Fetches live 12-hour NYC precipitation forecasts from Open-Meteo to highlight upcoming moderate or heavy rainfall that could stress urban drains <em>before</em> street ponding begins. Clearly labeled as external weather context, separate from observed sensor depth.</p>
+          </article>
+        </div>
+
+        <div class="inline-notice notice-info" style="margin-bottom:0;">
+          <strong>Why We Do Not Claim Exact Flood-Time Predictions:</strong> When sensor quality is Good and water rises steadily on the tabletop model, the dashboard computes a simple mathematical projection (<code>Remaining Depth &divide; Current Rise Rate</code>). This is a <strong>short-term linear indicator, not a guaranteed flood clock</strong>. Real-world urban flooding depends on nonlinear rainfall bursts, sewer surcharging, street grading, and sudden debris blockages &mdash; predicting an exact flood arrival time requires extensive real-world field data and calibrated hydrologic models.
+        </div>
+      </section>
+
+      <!-- ================================================================
+           5. PROFESSOR'S QUESTIONS ANSWERED (10 CORE QUESTIONS)
+           ================================================================ -->
+      <section id="sec-professor-qa" class="surface-card research-section" aria-labelledby="professorQaHeading">
+        <div class="card-header-row" style="margin-bottom:12px;">
+          <div>
+            <h2 id="professorQaHeading" class="card-title">5. Professor&rsquo;s Questions Answered</h2>
+            <p class="card-subtitle">Concise, honest technical answers prepared for faculty review and live demonstration Q&amp;A. Click any card to collapse or expand.</p>
+          </div>
+          <span class="status-tag tag-normal">10 Core Questions</span>
+        </div>
+
+        <div class="qa-grid">
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q1</span><span>What creates urban flooding?</span></summary>
+            <p class="qa-answer">Urban flooding happens when water enters streets faster than it can drain or infiltrate. In NYC, this is driven by heavy cloudburst rainfall overwhelming sewers, impermeable asphalt and concrete surfaces, debris-blocked catch basins, coastal storm surges/high tides, or water-main and sewer breaks.</p>
+          </details>
+
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q2</span><span>Why did Hurricane Sandy cause major flooding?</span></summary>
+            <p class="qa-answer">In October 2012, Hurricane Sandy&rsquo;s exceptionally wide wind field arrived at peak astronomical high tide, pushing a historic coastal storm surge into New York Harbor and the East and Hudson Rivers. Water overtopped shoreline barriers and inundated roughly 17% of NYC&rsquo;s land area, subway tunnels, and coastal neighborhoods.</p>
+          </details>
+
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q3</span><span>Why is the storm drain important?</span></summary>
+            <p class="qa-answer">NYC&rsquo;s ~150,000 catch basins (storm drains) are the primary entry points moving street rainwater into the 7,500-mile underground sewer network. When grates are clear and pipes have capacity, they keep intersections, crosswalks, and building entrances from pooling during everyday storms.</p>
+          </details>
+
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q4</span><span>What happens when the drain becomes blocked?</span></summary>
+            <p class="qa-answer">Leaves, litter, and sediment matted over a catch basin block outflow while runoff keeps arriving, causing water to pool rapidly right at the curb and spread into intersections and basement entrances. Our 3D-printed street model reproduces this directly: inserting the removable blockage turns steady pump circulation into WARNING and CRITICAL ponding within seconds.</p>
+          </details>
+
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q5</span><span>Why use an ultrasonic sensor?</span></summary>
+            <p class="qa-answer">The HC-SR04 measures air distance down to the water surface using 40 kHz sound pulses without touching dirty, debris-filled floodwater. It is inexpensive, easy to mount above a street model, and follows the same non-contact overhead sensing principle used in real deployments like NYC FloodNet.</p>
+          </details>
+
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q6</span><span>What happens if the water shakes or splashes?</span></summary>
+            <p class="qa-answer">Splashes and surface waves scatter ultrasonic echoes and introduce noisy spikes or dropouts. We reduce false alarms using 7-sample median filtering, 3-reading alert confirmation, locked dry calibration, and statistical trend gating (marking noisy trends as <em>Uncertain</em> or flagging suspicious spikes) &mdash; while honestly recognizing that severe continuous turbulence still degrades accuracy.</p>
+          </details>
+
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q7</span><span>How accurate is the system?</span></summary>
+            <p class="qa-answer">It is an educational tabletop prototype, not a certified hydrologic gauge. On a rigidly mounted, dry-calibrated model with calm water it reliably separates dry road from WARNING (&ge;0.50 cm) and CRITICAL (&ge;1.25 cm) pooling, but true error bounds (&plusmn;mm under ripples and vibration) must be measured against an independent ruler or calibrated reference across repeated trials.</p>
+          </details>
+
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q8</span><span>Can the system determine the exact cause of flooding?</span></summary>
+            <p class="qa-answer">No. A single overhead water-depth sensor only measures surface height over time &mdash; it cannot directly see whether water came from a clogged grate, a surcharged sewer, a broken water main, or coastal surge. Combining depth rise with live NYC rainfall data provides helpful clues (such as flagging a <em>suspected</em> blocked drain), but confirming the exact physical cause still requires inspection or additional sensors.</p>
+          </details>
+
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q9</span><span>How does NYC FloodGuard differ from FloodNet?</span></summary>
+            <p class="qa-answer">NYC FloodNet is an operational citywide network (NYU/CUNY/NYC) measuring real neighborhood street floods across the five boroughs. NYC FloodGuard is a student prototype inspired by FloodNet that focuses on active local early warning &mdash; combining rate-of-rise detection, blocked-drain heuristics, live Open-Meteo rainfall context, and an interactive tabletop demonstration &mdash; while keeping authentic historical FloodNet Open Data cleanly separated for comparison.</p>
+          </details>
+
+          <details class="qa-item" open>
+            <summary><span class="qa-num">Q10</span><span>How could this technology help protect buildings and communities?</span></summary>
+            <p class="qa-answer">If rebuilt with weatherproof, field-validated sensors near vulnerable basement apartments, subway stairs, underpasses, and ground-floor entrances, localized rising-water alerts could give residents, building superintendents, and maintenance crews crucial extra minutes to clear grates, deploy flood barriers, move vehicles, or avoid entering dangerous standing water.</p>
+          </details>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           6. POSSIBLE REAL-WORLD IMPROVEMENTS (PROPOSED / FUTURE ONLY)
+           ================================================================ -->
+      <section id="sec-future-improvements" class="surface-card research-section" aria-labelledby="futureImprovementsHeading">
+        <div class="card-header-row" style="margin-bottom:10px;">
+          <div>
+            <h2 id="futureImprovementsHeading" class="card-title">6. Possible Real-World Improvements</h2>
+            <p class="card-subtitle">Engineering next steps required to move beyond a tabletop classroom model toward real urban deployment.</p>
+          </div>
+          <span class="status-tag tag-neutral">Proposed / Future Only</span>
+        </div>
+
+        <div class="hardware-grid">
+          <article class="hw-item">
+            <h3>Local Warnings Near Vulnerable Entrances</h3>
+            <p>Deploy weatherproof audible/visual warning beacons and neighborhood notifications directly beside basement apartment entries, underground garages, and low-lying lobbies.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>Additional Backup Sensors</h3>
+            <p>Pair ultrasonic sensors with industrial waterproof transducers, contact float switches, or submerged pressure sensors so two independent physical measurements must agree before triggering critical actions.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>Weather-Informed Early Alerts</h3>
+            <p>Combine local street depth sensors with official National Weather Service Flash Flood Warnings, Doppler radar rainfall rates, and NOAA harbor tide/surge gauges for multi-hazard context.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>More Reliable Trend Detection</h3>
+            <p>Upgrade single-sensor regression with multi-sensor fusion, adaptive Kalman filtering, and storm-calibrated anomaly detection that distinguishes vehicles, pedestrians, and splash waves from true rising water.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>Automatic Protective Responses</h3>
+            <p>Evaluate relay-controlled sump pumps or motorized flood barriers backed by redundant sensors, hardware safety interlocks, and manual overrides so a sensor glitch can never trigger an unsafe mechanical action.</p>
+          </article>
+
+          <article class="hw-item">
+            <h3>Testing with Real-World Sensor Data</h3>
+            <p>Conduct independent ruler/gauge accuracy benchmarks, outdoor weatherproofing trials, and back-testing against multi-year NYC FloodNet storm hydrographs before making operational reliability claims.</p>
+          </article>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           7. PHYSICAL PROTOTYPE HARDWARE, WIRING & VERIFICATION MATRIX
+           ================================================================ -->
+      <section id="sec-hardware-overview" class="surface-card research-section">
+        <h2 class="card-title" style="margin-bottom:12px;">7. Physical Prototype Hardware Components</h2>
         <div class="hardware-grid">
           <div class="hw-item">
             <h3>Arduino GIGA R1 WiFi</h3>
-            <p>Dual-core STM32H747XI microcontroller (3.3V GPIO logic) reading ultrasonic pulses, float switches, and streaming JSON over USB Serial at 115200 baud.</p>
-          </div>
-          <div class="hw-item">
-            <h3>Arduino GIGA Display Shield</h3>
-            <p>Local touchscreen display module planned for on-model water depth and warning status readout alongside the web dashboard.</p>
+            <p>Dual-core STM32H747XI microcontroller (3.3V GPIO logic) running 7-sample median filtering, 3-reading alert confirmation, and USB Serial streaming at 115200 baud.</p>
           </div>
           <div class="hw-item">
             <h3>HC-SR04 Ultrasonic Sensor</h3>
-            <p>Mounted above the 3D-printed street surface to measure air distance to water continuously without contacting floodwater.</p>
+            <p>Mounted on a secured riser above the 3D-printed street surface to measure air distance to water continuously without contacting floodwater.</p>
           </div>
           <div class="hw-item">
-            <h3>Float Switches</h3>
-            <p>Physical backup water-level switches (Low &amp; High) wired with <code>INPUT_PULLUP</code> to verify water contact independently of ultrasonic echoes.</p>
+            <h3>3D-Printed NYC Street &amp; Storm Drain</h3>
+            <p>Scale NYC roadway, buildings, and catch-basin drain with a removable drain blockage to physically reproduce clogged-drain urban flooding.</p>
           </div>
           <div class="hw-item">
-            <h3>Two Water Pumps (Manual Demo)</h3>
-            <p>One inflow pump to simulate rising street flooding and one drainage pump to demonstrate falling water recovery. Operated manually until relay hardware is added.</p>
+            <h3>Two 5V Water Pumps (Manual Control)</h3>
+            <p>Circulation and drainage pumps used during physical demonstrations to produce rising water when the drain is blocked and receding water when cleared.</p>
           </div>
           <div class="hw-item">
-            <h3>3D-Printed NYC Street Model &amp; Optional Barrier</h3>
-            <p>Scale NYC street and building basin for controlled testing, with optional future support for a servo-controlled flood barrier.</p>
+            <h3>Arduino GIGA Display Shield</h3>
+            <p>Touchscreen display firmware support for local on-model readout of water depth, alert status, trend, and sensor quality alongside the web dashboard.</p>
+          </div>
+          <div class="hw-item">
+            <h3>Float Switches &amp; Optional Barrier</h3>
+            <p>Firmware pins reserved for Low/High contact float switches (<code>D6</code>/<code>D7</code>) and optional future servo barrier (<code>D5</code>, disabled by default).</p>
           </div>
         </div>
       </section>
 
-      <!-- Wiring Safety, Serial JSON & Calibration -->
+      <!-- Wiring Safety & Serial Formats -->
       <div class="about-grid-2" style="margin-bottom:20px;">
         <section class="surface-card">
           <h2 class="card-title" style="margin-bottom:8px;">3.3V GPIO Safety &amp; Sensor Calibration</h2>
           <div class="inline-notice notice-warn" style="margin-bottom:12px;">
-            <strong>Critical 3.3V Warning (Arduino GIGA R1 WiFi):</strong> GIGA R1 GPIO pins are <strong>3.3V only</strong> and are NOT 5V tolerant. A standard 5V HC-SR04 outputs 5V on its <code>ECHO</code> pin &mdash; connect <code>ECHO</code> through <strong>two 470&nbsp;&Omega; resistors in series (940&nbsp;&Omega;) toward <code>D10</code></strong> with <strong>one 1&nbsp;k&Omega; resistor from <code>D10</code> to <code>GND</code></strong> (steps 5V safely down to ~2.58V for 3.3V GPIO).
+            <strong>Critical 3.3V Warning (Arduino GIGA R1 WiFi):</strong> GIGA R1 GPIO pins are <strong>3.3V only</strong> and are NOT 5V tolerant. Connect HC-SR04 <code>ECHO</code> through <strong>two 470&nbsp;&Omega; resistors in series (940&nbsp;&Omega;) toward <code>D10</code></strong> with <strong>one 1&nbsp;k&Omega; resistor from <code>D10</code> to <code>GND</code></strong> (steps 5V safely down to ~2.58V).
           </div>
           <ul class="clean-list">
             <li><strong>Wiring:</strong> <code>VCC &rarr; 5V</code>, <code>GND &rarr; GND</code>, <code>TRIG &rarr; D9</code>, <code>ECHO &rarr; 470&Omega; + 470&Omega; &rarr; D10 &rarr; 1k&Omega; &rarr; GND</code>, Float switches &rarr; <code>D6 / D7</code> to <code>GND</code>.</li>
-            <li><strong>Calibration:</strong> Empty the 3D-printed street model completely dry, measure the distance from the HC-SR04 sensor face to the street floor (in cm), and set <code>MOUNT_HEIGHT_CM</code> in both the sketch and Administrator Settings.</li>
+            <li><strong>Dry-Road Calibration:</strong> Drain the street model completely dry before locking the dry baseline, or use the confirmed manual recalibration control (serial command <code>c</code>).</li>
             <li><strong>Browser Requirement:</strong> Web Serial requires desktop Google Chrome or Microsoft Edge over HTTPS or localhost.</li>
           </ul>
         </section>
@@ -977,7 +1571,7 @@
         <section class="surface-card">
           <h2 class="card-title" style="margin-bottom:8px;">Supported USB Serial Formats (115200 baud)</h2>
           <p class="card-subtitle" style="margin-bottom:10px;">
-            NYC FloodGuard 2.0 automatically parses BOTH the tested human-readable Arduino output and newline-delimited JSON:
+            NYC FloodGuard 2.0 parses both the tested human-readable Arduino output and newline-delimited JSON:
           </p>
           <pre class="code-block">Distance: 14.39 cm | Water Depth: 0.00 cm | Status: NORMAL
 Distance: 13.36 cm | Water Depth: 1.03 cm | Status: WARNING
@@ -987,28 +1581,35 @@ Distance: 12.67 cm | Water Depth: 1.72 cm | Status: CRITICAL</pre>
         </section>
       </div>
 
-      <!-- Honest Completed vs. Planned Status -->
+      <!-- Honest 3-Column Verification Status Matrix -->
       <section class="surface-card">
-        <h2 class="card-title" style="margin-bottom:12px;">Project Status: Completed vs. Planned Features</h2>
-        <div class="about-grid-2">
-          <div>
-            <h3 class="sub-heading status-text-normal">Completed &amp; Working</h3>
+        <h2 class="card-title" style="margin-bottom:12px;">Verification Summary: Physically Tested vs. Software-Tested vs. Proposed</h2>
+        <div class="status-grid-3">
+          <div class="status-col-box">
+            <h3 class="sub-heading status-text-normal">Physically Tested (Hardware)</h3>
             <ul class="clean-list">
-              <li>Web Serial USB live connection for Arduino GIGA R1 WiFi (supports both tested pipe-delimited text output and JSON at 115200 baud).</li>
-              <li>Real-time water depth, NORMAL (green) / WARNING (amber) / CRITICAL (red) status, live chart, alert banners, and flood-alert event history.</li>
-              <li>Live NYC weather &amp; 12-hour rainfall forecast via Open-Meteo API with severe rainfall indicators.</li>
-              <li>Rule-based FloodGuard Risk Intelligence with rapid-rise &amp; blocked storm-drain diagnostics.</li>
-              <li>Optional server-side Gemini AI FloodGuard Assistant (when running with Node/Express backend and server-side <code>GEMINI_API_KEY</code>).</li>
-              <li>6-stage classroom Demo Mode, Supabase Auth + RLS Admin Settings, and NYC FloodNet historical archive + bookmarks.</li>
+              <li>Arduino GIGA R1 WiFi + HC-SR04 ultrasonic sensor (with 3.3V resistor divider on <code>D10</code>) streaming live over USB Web Serial at 115200 baud.</li>
+              <li>3D-printed NYC street, secured sensor riser, circulating 5V pump, and removable storm-drain blockage reproducing ponding and drainage recovery.</li>
+              <li>On-device dry-road calibration, 7-sample median filtering, and 3-reading alert confirmation detecting real <strong>CRITICAL</strong> flooding (verified at 2.42 cm on the live dashboard).</li>
             </ul>
           </div>
-          <div>
-            <h3 class="sub-heading status-text-warn">Requires Configuration / Planned</h3>
+
+          <div class="status-col-box">
+            <h3 class="sub-heading status-text-info">Software-Tested (Web &amp; API)</h3>
             <ul class="clean-list">
-              <li><strong>AI Assistant on Static Hosting:</strong> Requires the Node/Express server runtime + <code>GEMINI_API_KEY</code> (static GitHub Pages disables AI calls honestly).</li>
-              <li><strong>Wi-Fi Cloud Sync (Planned):</strong> Direct automatic upload from Arduino GIGA R1 WiFi to Supabase over Wi-Fi.</li>
-              <li><strong>Automatic Pump Control (Planned):</strong> Relay driver circuit &amp; safety interlock firmware (5V pumps are currently operated manually).</li>
-              <li><strong>Real-World Flood Validation:</strong> Thresholds (0.50 cm / 1.25 cm) are calibrated for the miniature 3D-printed street model, not validated for full-scale NYC streets.</li>
+              <li>Locked dry-road baseline protection, confirmed <code>c</code> recalibration flow, suspicious-reading flagging, and stale/disconnected stream detection.</li>
+              <li>Rolling-window rate of rise, FloodGuard Risk Intelligence (rapid-rise &amp; suspected blocked-drain heuristics), test-session recording, and CSV export.</li>
+              <li>Live Open-Meteo NYC weather &amp; 12-hour forecast, Supabase Auth + RLS Admin Settings, NYC FloodNet historical archive + bookmarks, 6-stage Demo Mode, and optional server-side Gemini AI Assistant (via Render backend).</li>
+            </ul>
+          </div>
+
+          <div class="status-col-box">
+            <h3 class="sub-heading status-text-warn">Proposed / Future (Not Built Yet)</h3>
+            <ul class="clean-list">
+              <li>Formal independent accuracy benchmarking (comparing HC-SR04 vs. calibrated ruler/gauge under splashes and vibration).</li>
+              <li>Direct Arduino Wi-Fi cloud upload to Supabase and outdoor waterproof multi-sensor redundancy (float + hydrostatic pressure).</li>
+              <li>Automated relay pump control or motorized flood barriers with hardware safety interlocks.</li>
+              <li>Real-world NYC street field validation and storm-calibrated flood arrival time modeling.</li>
             </ul>
           </div>
         </div>

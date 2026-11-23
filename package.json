@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
-    "start": "node server.ts"
+    "start": "node server.ts",
+    "start:api": "tsx server.ts"
   },
   "devDependencies": {
     "vite": "^6.0.0"
