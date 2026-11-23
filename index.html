@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NYC FloodGuard | Urban Flood Early-Warning &amp; Drainage Prototype</title>
-  <meta name="description" content="NYC FloodGuard — Educational engineering prototype for ultrasonic street-level flood detection, rising-water early-warning ETA, drainage monitoring, and NYC FloodNet historical data comparison." />
-  <meta property="og:title" content="NYC FloodGuard | Urban Flood Early-Warning &amp; Drainage Prototype" />
-  <meta property="og:description" content="Arduino GIGA R1 WiFi ultrasonic flood-monitoring prototype with rising-water early warning, drainage tracking, Supabase Auth, and official NYC FloodNet historical archive." />
+  <title>NYC FloodGuard 2.0 | Urban Flood Monitoring &amp; Early-Warning System</title>
+  <meta name="description" content="NYC FloodGuard 2.0 — Intelligent urban flood monitoring and early-warning IoT prototype with Arduino GIGA R1 WiFi Web Serial telemetry, live Open-Meteo NYC weather, FloodGuard Risk Intelligence, optional server-side AI Assistant, Supabase Auth, and NYC FloodNet historical archive." />
+  <meta property="og:title" content="NYC FloodGuard 2.0 | Urban Flood Monitoring &amp; Early-Warning System" />
+  <meta property="og:description" content="Real-time Arduino ultrasonic water-depth monitoring, live NYC weather forecasts, rule-based flood risk intelligence, Supabase Auth, and authentic NYC FloodNet historical flood data." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;family=Plus+Jakarta+Sans:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet" />
@@ -27,7 +27,7 @@
             <path d="M8 14c1.5 1 2.5 1 4 0s2.5-1 4 0"></path>
           </svg>
         </span>
-        <span class="brand-title">NYC FloodGuard</span>
+        <span class="brand-title">NYC FloodGuard 2.0</span>
       </a>
 
       <nav id="primaryNav" class="primary-nav" aria-label="Primary Navigation">
@@ -255,72 +255,95 @@
     </section>
 
     <!-- ==================================================================
-         SECTION 2: FLOODGUARD DASHBOARD (#view-dashboard) — MOST IMPORTANT
+         SECTION 2: FLOODGUARD 2.0 MONITORING DASHBOARD (#view-dashboard)
          ================================================================== -->
     <section id="view-dashboard" class="view-section" aria-labelledby="dashHeading">
-      <!-- Top Source Mode & Connection Bar -->
+      <!-- Top Source Mode & Connection Command Bar -->
       <div class="section-header dash-top-header">
         <div>
           <div class="meta-line">
-            <span id="dashSourceBadge" class="source-indicator source-unavailable">UNAVAILABLE</span>
+            <span id="dashSourceBadge" class="source-indicator source-unavailable">OFFLINE / UNAVAILABLE</span>
             <span class="meta-sep" aria-hidden="true">&middot;</span>
-            <span id="dashQualityBadge" class="source-indicator quality-unavailable" title="Ultrasonic signal quality status">Quality: Unavailable</span>
+            <span id="dashQualityBadge" class="meta-status-text quality-text-unavailable" title="Ultrasonic signal quality status">Sensor Quality: Unavailable</span>
             <span class="meta-sep" aria-hidden="true">&middot;</span>
-            <span id="dashSourceDetail" class="meta-text">No live Arduino or backup simulation active</span>
+            <span id="dashLastTimestamp" class="mono-subtext">Last reading: --</span>
           </div>
-          <h1 id="dashHeading" class="section-title">FloodGuard Prototype Monitoring Dashboard</h1>
-          <p class="section-subtitle">
-            Validated ultrasonic depth in centimeters, spike-filtered water-level trend, sensor quality monitoring, and conservative early-warning projections.
+          <h1 id="dashHeading" class="section-title">NYC FloodGuard 2.0 Operations Dashboard</h1>
+          <p id="dashSourceDetail" class="section-subtitle">
+            Connect your Arduino GIGA R1 WiFi over USB (115200 baud) for live street-model measurements, or launch Demo Mode for a guided walkthrough.
           </p>
         </div>
 
-        <div class="connection-controls">
-          <button type="button" id="btnConnectArduino" class="btn btn-cyan">Connect Arduino (USB)</button>
-          <button type="button" id="btnDisconnectArduino" class="btn btn-outline hidden">Disconnect Arduino</button>
-          <button type="button" id="btnToggleSimBackup" class="btn btn-outline">Start Simulation Backup</button>
+        <div class="connection-controls-wrap">
+          <div class="connection-controls">
+            <button type="button" id="btnConnectArduino" class="btn btn-cyan">Connect Arduino (USB)</button>
+            <button type="button" id="btnDisconnectArduino" class="btn btn-danger hidden">Disconnect Arduino</button>
+            <button type="button" id="btnToggleSimBackup" class="btn btn-outline">Start Demo Mode</button>
+          </div>
+          <p class="serial-hint-text">
+            Close the Arduino IDE Serial Monitor before connecting. Web Serial requires desktop Chrome or Edge.
+          </p>
         </div>
+      </div>
+
+      <!-- Active Flood Status Change Warning Banner (Amber for WARNING, Red for CRITICAL) -->
+      <div id="dashAlertBanner" class="alert-banner hidden" role="alert" aria-live="assertive">
+        <div class="alert-banner-content">
+          <strong id="dashAlertBannerTitle">FLOOD WARNING ACTIVE</strong>
+          <span id="dashAlertBannerBody">Water depth has crossed the configured alert threshold.</span>
+        </div>
+        <span id="dashAlertBannerTime" class="mono-text alert-banner-time">--:--:--</span>
       </div>
 
       <!-- Browser Web Serial Support / Connection Feedback Notice -->
       <div id="dashConnectionNotice" class="inline-notice notice-info hidden" role="status" aria-live="polite"></div>
 
-      <!-- Backup Simulation Controls (Visible ONLY when Simulation Backup is active) -->
-      <div id="simControlStrip" class="sim-strip hidden" role="region" aria-label="Backup Simulation Controls">
-        <div class="sim-strip-info">
-          <strong>SIMULATED DEMO BACKUP (Not Live Arduino Hardware)</strong>
-          <span>Use these scenarios to test rising-water ETA, splash filtering, and falling-water trend detection when hardware is disconnected.</span>
+      <!-- 6-Stage Classroom DEMO MODE Controls (Strictly separated from LIVE Arduino readings) -->
+      <div id="simControlStrip" class="sim-strip hidden" role="region" aria-label="Demo Mode Walkthrough Controls">
+        <div class="sim-strip-top">
+          <div class="sim-strip-info">
+            <strong>DEMO MODE &mdash; SIMULATED DATA (Not Live Arduino Hardware)</strong>
+            <span id="demoStageDescription">Stage 1 of 6: Normal Drainage &mdash; dry street surface with clear storm drain.</span>
+          </div>
+          <div class="sim-strip-actions">
+            <button type="button" id="btnDemoAutoToggle" class="btn btn-sm btn-primary">Pause Auto-Sequence</button>
+            <button type="button" id="btnDemoRestart" class="btn btn-sm btn-outline">Restart Sequence</button>
+            <button type="button" id="btnDemoStop" class="btn btn-sm btn-danger">Exit Demo Mode</button>
+          </div>
         </div>
-        <div class="sim-strip-actions">
-          <button type="button" id="btnSimRise" class="btn btn-sm btn-warning">Simulate Rising Water</button>
-          <button type="button" id="btnSimDrain" class="btn btn-sm btn-cyan">Simulate Falling Water</button>
-          <button type="button" id="btnSimSteady" class="btn btn-sm btn-outline">Hold Steady</button>
-          <button type="button" id="btnSimResetDry" class="btn btn-sm btn-outline">Reset Dry (0 cm)</button>
+        <div class="demo-stage-bar" role="group" aria-label="Demonstration Stages">
+          <button type="button" class="demo-stage-btn active" data-demo-stage="0">1. Normal Drainage</button>
+          <button type="button" class="demo-stage-btn" data-demo-stage="1">2. Rising Water</button>
+          <button type="button" class="demo-stage-btn" data-demo-stage="2">3. Warning</button>
+          <button type="button" class="demo-stage-btn" data-demo-stage="3">4. Critical Flooding</button>
+          <button type="button" class="demo-stage-btn" data-demo-stage="4">5. Water Receding</button>
+          <button type="button" class="demo-stage-btn" data-demo-stage="5">6. Recovery</button>
         </div>
       </div>
 
-      <!-- Primary Telemetry Readouts Grid -->
-      <div class="telemetry-grid" aria-live="polite">
-        <!-- 1. Flood Status Level -->
-        <article id="cardFloodStatus" class="metric-card status-card-unavailable">
-          <div class="metric-label">Flood Status Level</div>
-          <div id="dashStatusValue" class="metric-status-text">UNAVAILABLE</div>
-          <div id="dashStatusMeta" class="metric-subtext">
-            Prototype thresholds: Warn &ge; <span id="dashWarnValLabel">6.0</span> cm &middot; Crit &ge; <span id="dashCritValLabel">12.0</span> cm
+      <!-- Primary Telemetry Readouts Grid (Dominant Water Depth + Status + Trend + Rate + ETA) -->
+      <div class="telemetry-hero-grid" aria-live="polite">
+        <!-- 1. Large Live Water-Depth Hero Indicator -->
+        <article class="metric-card metric-card-hero">
+          <div class="metric-label">Live Water Depth</div>
+          <div class="hero-depth-row">
+            <span id="dashDepthCm" class="hero-depth-value">--</span>
+            <span class="hero-depth-unit">cm</span>
+          </div>
+          <div id="dashDepthFormula" class="metric-subtext mono-text">
+            Depth = Dry Baseline &minus; Sensor Distance
+          </div>
+          <div id="dashRawReadingLine" class="metric-subtext mono-text raw-reading-subtext">
+            Sensor distance: -- &middot; Latest raw: --
           </div>
         </article>
 
-        <!-- 2. Filtered Water Level (Mathematically Consistent with Filtered Distance) -->
-        <article class="metric-card">
-          <div class="metric-label">Filtered Water Level</div>
-          <div class="metric-number-row">
-            <span id="dashDepthCm" class="metric-value">--</span>
-            <span class="metric-unit">cm</span>
-          </div>
-          <div id="dashDepthFormula" class="metric-subtext mono-text">
-            Filtered Depth = Mount &minus; Filtered Dist
-          </div>
-          <div id="dashRawReadingLine" class="metric-subtext mono-text raw-reading-subtext">
-            Latest raw sensor: --
+        <!-- 2. Flood Status Level (Green NORMAL / Amber WARNING / Red CRITICAL) -->
+        <article id="cardFloodStatus" class="metric-card status-card-unavailable">
+          <div class="metric-label">Flood Status</div>
+          <div id="dashStatusValue" class="metric-status-text">UNAVAILABLE</div>
+          <div id="dashStatusMeta" class="metric-subtext">
+            Normal &lt; <span id="dashWarnValLabel">0.50</span> cm &middot; Warn &ge; 0.50 cm &middot; Crit &ge; <span id="dashCritValLabel">1.25</span> cm
           </div>
         </article>
 
@@ -341,36 +364,36 @@
             <span class="metric-unit">cm/min</span>
           </div>
           <div id="dashRateMeta" class="metric-subtext">
-            Causal median &amp; spike rejection active
+            Median filtering &amp; spike rejection active
           </div>
         </article>
 
         <!-- 5. Early-Warning Threshold ETA -->
         <article class="metric-card metric-card-eta">
-          <div class="metric-label">Estimated Time to Threshold</div>
+          <div class="metric-label">Threshold ETA Projection</div>
           <div class="eta-pair">
             <div class="eta-row">
-              <span class="eta-key">Warning (<span id="dashEtaWarnThresh">6.0</span> cm)</span>
+              <span class="eta-key">Warning (<span id="dashEtaWarnThresh">0.50</span> cm)</span>
               <strong id="dashEtaWarnVal" class="eta-val">Not available</strong>
             </div>
             <div class="eta-row">
-              <span class="eta-key">Critical (<span id="dashEtaCritThresh">12.0</span> cm)</span>
+              <span class="eta-key">Critical (<span id="dashEtaCritThresh">1.25</span> cm)</span>
               <strong id="dashEtaCritVal" class="eta-val">Not available</strong>
             </div>
           </div>
           <div id="dashEtaNote" class="metric-subtext">
-            Mathematical projection only &mdash; shown only when sensor quality is Good and water rises reliably.
+            Shown only when sensor quality is Good and water rises reliably.
           </div>
         </article>
       </div>
 
-      <!-- Simple Water-Level History Chart -->
+      <!-- Real-Time Water-Level History Line Chart -->
       <section class="surface-card chart-section" aria-labelledby="dashChartHeading">
         <div class="card-header-row">
           <div>
-            <h2 id="dashChartHeading" class="card-title">Water-Level History (cm)</h2>
+            <h2 id="dashChartHeading" class="card-title">Real-Time Water-Level Chart (cm)</h2>
             <p id="dashChartReadout" class="card-subtitle">
-              Filtered ultrasonic water depth plotted against configurable prototype Warning and Critical thresholds.
+              Auto-updating water depth plotted against Warning (amber) and Critical (red) alert thresholds.
             </p>
           </div>
           <div class="chart-legend-inline">
@@ -381,22 +404,225 @@
           </div>
         </div>
         <div class="chart-canvas-wrap">
-          <canvas id="floodHistoryCanvas" aria-label="Water level history chart in centimeters"></canvas>
+          <canvas id="floodHistoryCanvas" aria-label="Real-time water level history chart in centimeters"></canvas>
           <div id="dashChartEmptyOverlay" class="chart-empty-overlay">
-            <p><strong>No active readings to plot.</strong></p>
-            <p>Click <strong>Connect Arduino (USB)</strong> for live hardware readings or <strong>Start Simulation Backup</strong> for a prototype walkthrough.</p>
+            <p><strong>No active sensor measurements to plot.</strong></p>
+            <p>Click <strong>Connect Arduino (USB)</strong> for live HC-SR04 readings or <strong>Start Demo Mode</strong> for a 6-stage flood walkthrough.</p>
           </div>
         </div>
       </section>
 
-      <!-- Hardware Diagnostics & Prototype Configuration Row -->
+      <!-- Operational Row 1: FloodGuard Risk Intelligence + Live NYC Weather (Open-Meteo) -->
+      <div class="dash-secondary-grid dash-panel-gap">
+        <!-- FloodGuard Risk Intelligence (Transparent Rule-Based Analysis) -->
+        <section id="riskIntelligencePanel" class="surface-card" aria-labelledby="riskIntelHeading">
+          <div class="card-header-row" style="margin-bottom:12px;">
+            <div>
+              <h2 id="riskIntelHeading" class="card-title">FloodGuard Risk Intelligence</h2>
+              <p class="card-subtitle">Transparent rule-based analysis combining observed sensor telemetry with live NYC rainfall forecasts.</p>
+            </div>
+            <span id="riskLevelTag" class="status-tag tag-neutral">Awaiting Data</span>
+          </div>
+
+          <!-- Clear Separation: Observed Sensor Data vs. Forecast Data -->
+          <div class="intel-source-split">
+            <div class="intel-source-row">
+              <span class="intel-source-label">Observed Sensor Data</span>
+              <span id="riskObservedSummary" class="intel-source-value mono-text">No active sensor connected</span>
+            </div>
+            <div class="intel-source-row">
+              <span class="intel-source-label">NYC Forecast Data</span>
+              <span id="riskForecastSummary" class="intel-source-value mono-text">Loading Open-Meteo NYC forecast&hellip;</span>
+            </div>
+          </div>
+
+          <!-- Rapid Rise & Blocked Storm Drain Diagnostics -->
+          <div class="intel-flags-grid">
+            <div id="riskRapidRiseBox" class="intel-flag-box">
+              <div class="intel-flag-title">Rapid-Rise Monitor</div>
+              <div id="riskRapidRiseVal" class="intel-flag-val">Not detected</div>
+            </div>
+            <div id="riskBlockedDrainBox" class="intel-flag-box">
+              <div class="intel-flag-title">Storm-Drain Efficiency</div>
+              <div id="riskBlockedDrainVal" class="intel-flag-val">Normal / Unmonitored</div>
+            </div>
+          </div>
+
+          <p id="riskBlockedDrainNote" class="intel-drain-note">
+            Connect the Arduino or launch Demo Mode to evaluate street drainage efficiency.
+          </p>
+
+          <div class="intel-lists-grid">
+            <div>
+              <h3 class="intel-subhead">Why Risk Is Changing</h3>
+              <ul id="riskDriversList" class="intel-list">
+                <li>Waiting for observed sensor readings and NYC weather forecast.</li>
+              </ul>
+            </div>
+            <div>
+              <h3 class="intel-subhead">Early-Warning Recommendations</h3>
+              <ul id="riskRecommendationsList" class="intel-list">
+                <li>Connect your Arduino GIGA R1 WiFi or run Demo Mode to begin monitoring.</li>
+              </ul>
+            </div>
+          </div>
+
+          <p class="panel-disclaimer">
+            Rule-based prototype assessment only &mdash; distinguishes observed tabletop measurements from Open-Meteo forecast data and is not validated for official citywide NYC flood prediction.
+          </p>
+        </section>
+
+        <!-- Live NYC Weather Panel (Open-Meteo API) -->
+        <section id="nycWeatherPanel" class="surface-card" aria-labelledby="weatherHeading">
+          <div class="card-header-row" style="margin-bottom:12px;">
+            <div>
+              <h2 id="weatherHeading" class="card-title">Live NYC Weather &amp; Rainfall Forecast</h2>
+              <p id="weatherMetaLine" class="card-subtitle">Source: Open-Meteo Forecast API (NYC 40.71&deg;N, 74.01&deg;W) &middot; Updated: --</p>
+            </div>
+            <button type="button" id="btnRefreshWeather" class="btn btn-sm btn-outline">Refresh Weather</button>
+          </div>
+
+          <div id="weatherLoadingBox" class="inline-notice notice-info hidden">
+            Loading live New York City weather and hourly rainfall forecast from Open-Meteo&hellip;
+          </div>
+          <div id="weatherErrorBox" class="inline-notice notice-error hidden"></div>
+
+          <div id="weatherContentWrap">
+            <!-- Severe Rainfall Indicator Strip -->
+            <div id="weatherSeverityStrip" class="weather-severity-strip weather-sev-low">
+              <strong id="weatherSeverityLabel">Loading NYC Rainfall Outlook&hellip;</strong>
+              <span id="weatherSeverityDetail">Retrieving real hourly precipitation amounts and probabilities.</span>
+            </div>
+
+            <!-- Current NYC Conditions Grid -->
+            <div class="weather-metrics-grid">
+              <div class="weather-stat">
+                <span class="weather-stat-label">Current Condition</span>
+                <strong id="weatherCurrentCond" class="weather-stat-val">--</strong>
+                <span id="weatherCurrentTemp" class="mono-subtext">--&deg;F / --&deg;C</span>
+              </div>
+              <div class="weather-stat">
+                <span class="weather-stat-label">Current Rain</span>
+                <strong id="weatherCurrentRain" class="weather-stat-val mono-text">-- mm/h</strong>
+                <span id="weatherHumidityWind" class="mono-subtext">Humidity --% &middot; Wind -- mph</span>
+              </div>
+              <div class="weather-stat">
+                <span class="weather-stat-label">Next 6h Forecast</span>
+                <strong id="weatherNext6hPrecip" class="weather-stat-val mono-text">-- mm</strong>
+                <span id="weatherNext6hProb" class="mono-subtext">Max rain prob: --%</span>
+              </div>
+              <div class="weather-stat">
+                <span class="weather-stat-label">Next 24h Total</span>
+                <strong id="weatherNext24hPrecip" class="weather-stat-val mono-text">-- mm</strong>
+                <span id="weatherPeakHour" class="mono-subtext">Peak hour: --</span>
+              </div>
+            </div>
+
+            <!-- 12-Hour Hourly Rainfall Forecast Chart -->
+            <div class="weather-chart-header">
+              <span class="intel-subhead" style="margin:0;">Hourly Rainfall Forecast (Next 12 Hours &mdash; NYC Local Time)</span>
+              <span class="mono-subtext">mm/hr &amp; rain probability %</span>
+            </div>
+            <div class="weather-chart-wrap">
+              <canvas id="weatherRainCanvas" aria-label="Hourly NYC rainfall forecast chart for the next 12 hours"></canvas>
+            </div>
+            <div id="weatherHourlyStrip" class="weather-hourly-strip" aria-label="Hourly forecast breakdown"></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Operational Row 2: Flood-Alert Event History + AI FloodGuard Assistant -->
+      <div class="dash-secondary-grid dash-panel-gap">
+        <!-- Flood-Alert Event History -->
+        <section id="alertHistoryPanel" class="surface-card" aria-labelledby="alertHistoryHeading">
+          <div class="card-header-row" style="margin-bottom:12px;">
+            <div>
+              <h2 id="alertHistoryHeading" class="card-title">Flood-Alert Event History</h2>
+              <p class="card-subtitle">Automatic log of flood status transitions (NORMAL, WARNING, CRITICAL, OUT OF RANGE).</p>
+            </div>
+            <button type="button" id="btnClearAlertHistory" class="btn btn-sm btn-outline">Clear Log</button>
+          </div>
+
+          <div id="alertHistoryEmpty" class="empty-inline-state">
+            No status transitions logged yet. Connect the Arduino or run Demo Mode to record flood-alert events.
+          </div>
+
+          <div id="alertHistoryTableWrap" class="table-responsive hidden">
+            <table class="data-table compact-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Source</th>
+                  <th>Status Change</th>
+                  <th class="num-col">Depth</th>
+                  <th class="num-col">Distance</th>
+                </tr>
+              </thead>
+              <tbody id="alertHistoryTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Optional AI FloodGuard Assistant (Server-Side Gemini) -->
+        <section id="aiAssistantPanel" class="surface-card" aria-labelledby="aiAssistantHeading">
+          <div class="card-header-row" style="margin-bottom:10px;">
+            <div>
+              <h2 id="aiAssistantHeading" class="card-title">AI FloodGuard Assistant</h2>
+              <p class="card-subtitle">Optional plain-language explanations grounded in your current dashboard readings and NYC weather.</p>
+            </div>
+            <span id="aiStatusTag" class="status-tag tag-neutral">Checking&hellip;</span>
+          </div>
+
+          <div class="ai-disclaimer-line">
+            <strong>Informational Only:</strong> AI explanations are educational summaries and do not replace official NYC Emergency Management alerts.
+          </div>
+
+          <div class="ai-prompts-row" role="group" aria-label="Suggested FloodGuard questions">
+            <button type="button" class="ai-prompt-btn" data-question="Why is the flood risk increasing?">Why is the flood risk increasing?</button>
+            <button type="button" class="ai-prompt-btn" data-question="What happens when a storm drain becomes blocked?">What happens when a storm drain becomes blocked?</button>
+            <button type="button" class="ai-prompt-btn" data-question="What should pedestrians do during street flooding?">What should pedestrians do during street flooding?</button>
+            <button type="button" class="ai-prompt-btn" data-question="How does heavy rainfall affect NYC drainage systems?">How does heavy rainfall affect NYC drainage systems?</button>
+          </div>
+
+          <form id="aiAssistantForm" class="ai-input-form">
+            <input
+              type="text"
+              id="aiQuestionInput"
+              class="form-control"
+              maxlength="600"
+              placeholder="Ask about current water readings, drain blockages, or NYC flood safety..."
+              aria-label="Ask AI FloodGuard Assistant"
+              required
+            />
+            <button type="submit" id="btnAskAssistant" class="btn btn-primary">Ask Assistant</button>
+          </form>
+
+          <div id="aiErrorNotice" class="inline-notice notice-warn hidden" style="margin-top:10px;margin-bottom:0;"></div>
+
+          <div id="aiMessagesBox" class="ai-messages-box" aria-live="polite">
+            <div class="ai-empty-msg">
+              Select a suggested question above or type your own to get a plain-language explanation powered by server-side Gemini.
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Operational Row 3: Hardware Diagnostics & Supabase RLS Threshold Configuration -->
       <div class="dash-secondary-grid">
         <!-- Hardware Signals & Honest Feature Boundaries -->
         <section class="surface-card" aria-labelledby="hardwareSignalsHeading">
-          <h2 id="hardwareSignalsHeading" class="card-title" style="margin-bottom:4px;">Prototype Hardware &amp; Status</h2>
-          <p class="card-subtitle" style="margin-bottom:14px;">Live sensor inputs and honest boundary between implemented vs. planned hardware control.</p>
+          <h2 id="hardwareSignalsHeading" class="card-title" style="margin-bottom:4px;">Prototype Hardware &amp; Serial Diagnostics</h2>
+          <p class="card-subtitle" style="margin-bottom:14px;">Live sensor diagnostics and honest boundaries between implemented vs. planned capabilities.</p>
 
           <div class="spec-list">
+            <div class="spec-row">
+              <span class="spec-label">Serial Connection</span>
+              <strong id="hwSerialConnVal" class="mono-val">Disconnected</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Last Measurement Timestamp</span>
+              <strong id="hwLastTimestampVal" class="mono-val">--</strong>
+            </div>
             <div class="spec-row">
               <span class="spec-label">Sensor Quality</span>
               <strong id="hwSensorQualityVal" class="mono-val">Unavailable</strong>
@@ -410,28 +636,20 @@
               <strong id="hwDistanceVal" class="mono-val">--</strong>
             </div>
             <div class="spec-row">
-              <span class="spec-label">Sensor Mounting Height</span>
-              <strong id="hwMountHeightVal" class="mono-val">25.00 cm</strong>
+              <span class="spec-label">Dry-Road Calibration Height</span>
+              <strong id="hwMountHeightVal" class="mono-val">14.39 cm</strong>
             </div>
             <div class="spec-row">
-              <span class="spec-label">Low-Water Float Switch</span>
-              <strong id="hwFloatLowVal" class="mono-val">Not connected</strong>
+              <span class="spec-label">Last Raw Serial Line</span>
+              <span id="hwRawSerialLine" class="spec-note mono-text">--</span>
             </div>
             <div class="spec-row">
-              <span class="spec-label">High-Water Float Switch</span>
-              <strong id="hwFloatHighVal" class="mono-val">Not connected</strong>
+              <span class="spec-label">Low / High Float Switches</span>
+              <strong id="hwFloatStatusVal" class="mono-val">Not connected</strong>
             </div>
             <div class="spec-row">
-              <span class="spec-label">Flood &amp; Drainage Pumps</span>
-              <span class="spec-note">Manual only (pump state &amp; drainage operation are not yet monitored)</span>
-            </div>
-            <div class="spec-row">
-              <span class="spec-label">Servo Flood Barrier (Optional)</span>
-              <strong id="hwBarrierStateVal" class="mono-val">Not installed (Planned)</strong>
-            </div>
-            <div class="spec-row">
-              <span class="spec-label">Arduino Cloud Sync (Wi-Fi &rarr; Supabase)</span>
-              <span class="spec-note">Unfinished / Planned (currently local USB Serial)</span>
+              <span class="spec-label">5V Water Pumps (Flood &amp; Drain)</span>
+              <span class="spec-note">Manual / physical test rig (pump state not telemetered)</span>
             </div>
             <div class="spec-row">
               <span class="spec-label">Existing Supabase Demo Tables</span>
@@ -445,7 +663,7 @@
           <div class="card-header-row" style="margin-bottom:8px;">
             <div>
               <h2 id="settingsConfigHeading" class="card-title">Prototype Thresholds &amp; Calibration</h2>
-              <p class="card-subtitle">Calibrated for the physical tabletop prototype (not official NYC safety limits).</p>
+              <p class="card-subtitle">Calibrated for the tested 3D-printed NYC street prototype (Normal &lt; 0.50 cm, Warn 0.50&ndash;1.24 cm, Crit &ge; 1.25 cm).</p>
             </div>
             <span id="settingsRoleTag" class="status-tag tag-neutral">Read-Only</span>
           </div>
@@ -455,37 +673,38 @@
           <form id="adminSettingsForm" novalidate>
             <div class="form-row-2">
               <div class="form-group">
-                <label for="cfgMountHeightCm" class="form-label">Sensor Mounting Height (cm)</label>
-                <input type="number" id="cfgMountHeightCm" class="form-control mono-input" min="6" max="400" step="0.5" value="25.0" required />
+                <label for="cfgMountHeightCm" class="form-label">Dry-Road Baseline Height (cm)</label>
+                <input type="number" id="cfgMountHeightCm" class="form-control mono-input" min="4" max="400" step="0.01" value="14.39" required />
               </div>
               <div class="form-group">
                 <label for="cfgMinRiseRate" class="form-label">Min Reliable Rise (cm/min)</label>
-                <input type="number" id="cfgMinRiseRate" class="form-control mono-input" min="0.05" max="10" step="0.05" value="0.25" required />
+                <input type="number" id="cfgMinRiseRate" class="form-control mono-input" min="0.05" max="10" step="0.01" value="0.12" required />
               </div>
             </div>
 
             <div class="form-row-2">
               <div class="form-group">
-                <label for="cfgWarnThresholdCm" class="form-label" style="color:var(--warn-600);">Warning Threshold (cm)</label>
-                <input type="number" id="cfgWarnThresholdCm" class="form-control mono-input" min="0.5" max="200" step="0.5" value="6.0" required />
+                <label for="cfgWarnThresholdCm" class="form-label" style="color:var(--warn-700);">Warning Threshold (cm)</label>
+                <input type="number" id="cfgWarnThresholdCm" class="form-control mono-input" min="0.10" max="200" step="0.05" value="0.50" required />
               </div>
               <div class="form-group">
-                <label for="cfgCritThresholdCm" class="form-label" style="color:var(--crit-600);">Critical Threshold (cm)</label>
-                <input type="number" id="cfgCritThresholdCm" class="form-control mono-input" min="1.0" max="250" step="0.5" value="12.0" required />
+                <label for="cfgCritThresholdCm" class="form-label" style="color:var(--crit-700);">Critical Threshold (cm)</label>
+                <input type="number" id="cfgCritThresholdCm" class="form-control mono-input" min="0.20" max="250" step="0.05" value="1.25" required />
               </div>
             </div>
 
             <div class="form-group">
               <label for="cfgBarrierThresholdCm" class="form-label">Optional Servo Barrier Trigger (cm) <span class="muted-inline">(future hardware)</span></label>
-              <input type="number" id="cfgBarrierThresholdCm" class="form-control mono-input" min="1.0" max="250" step="0.5" value="10.0" required />
+              <input type="number" id="cfgBarrierThresholdCm" class="form-control mono-input" min="0.20" max="250" step="0.05" value="1.00" required />
             </div>
 
             <div id="adminSaveControls" class="btn-row hidden">
               <button type="submit" id="btnSaveAdminSettings" class="btn btn-primary">Save Settings to Supabase</button>
-              <button type="button" id="btnResetDefaultSettings" class="btn btn-outline">Restore Defaults</button>
+              <button type="button" id="btnPresetStreetModel" class="btn btn-outline">Street Model (0.50 / 1.25)</button>
+              <button type="button" id="btnResetDefaultSettings" class="btn btn-outline">Deep Basin (6.0 / 12.0)</button>
             </div>
             <p id="regularUserSettingsNote" class="form-footnote" style="margin-top:8px;">
-              Only database-verified Administrators can save changes (enforced by Supabase Row Level Security).
+              Only database-verified Administrators can save threshold changes to Supabase (enforced by Row Level Security). Live Arduino text packets automatically use the sensor's dry-road baseline.
             </p>
           </form>
         </section>
@@ -756,23 +975,15 @@
         </section>
 
         <section class="surface-card">
-          <h2 class="card-title" style="margin-bottom:8px;">USB Serial JSON Format (115200 baud)</h2>
+          <h2 class="card-title" style="margin-bottom:8px;">Supported USB Serial Formats (115200 baud)</h2>
           <p class="card-subtitle" style="margin-bottom:10px;">
-            The firmware emits one newline-terminated JSON object per second (<code>arduino/nyc_floodguard_giga.ino</code>):
+            NYC FloodGuard 2.0 automatically parses BOTH the tested human-readable Arduino output and newline-delimited JSON:
           </p>
-          <pre class="code-block">{
-  "device": "GIGA-R1-WIFI",
-  "mount_height_cm": 25.00,
-  "distance_cm": 18.40,
-  "water_depth_cm": 6.60,
-  "float_low": true,
-  "float_high": false,
-  "barrier_state": "not_installed",
-  "quality": "good",
-  "burst_spread_cm": 0.18,
-  "valid_pings": 5,
-  "uptime_ms": 14200
-}</pre>
+          <pre class="code-block">Distance: 14.39 cm | Water Depth: 0.00 cm | Status: NORMAL
+Distance: 13.36 cm | Water Depth: 1.03 cm | Status: WARNING
+Distance: 12.67 cm | Water Depth: 1.72 cm | Status: CRITICAL</pre>
+          <p class="card-subtitle" style="margin:10px 0 6px;">Or structured JSON (<code>arduino/nyc_floodguard_giga.ino</code>):</p>
+          <pre class="code-block">{"device":"GIGA-R1-WIFI","mount_height_cm":14.39,"distance_cm":13.36,"water_depth_cm":1.03,"quality":"good"}</pre>
         </section>
       </div>
 
@@ -783,20 +994,21 @@
           <div>
             <h3 class="sub-heading status-text-normal">Completed &amp; Working</h3>
             <ul class="clean-list">
-              <li>Supabase email authentication (register, sign in, logout, password reset, persistent sessions).</li>
-              <li>Real Web Serial USB connection for Arduino GIGA R1 WiFi with backup simulation mode.</li>
-              <li>Centimeter water-depth math, median ripple filtering, rising/falling drainage trend, and conservative threshold ETA.</li>
-              <li>Official NYC FloodNet historical API search, filtering, pagination (&gt;1,000 rows), and per-user Supabase bookmarks.</li>
-              <li>SQL migration prepared for database-enforced Administrator / Regular User roles and RLS-protected threshold settings.</li>
+              <li>Web Serial USB live connection for Arduino GIGA R1 WiFi (supports both tested pipe-delimited text output and JSON at 115200 baud).</li>
+              <li>Real-time water depth, NORMAL (green) / WARNING (amber) / CRITICAL (red) status, live chart, alert banners, and flood-alert event history.</li>
+              <li>Live NYC weather &amp; 12-hour rainfall forecast via Open-Meteo API with severe rainfall indicators.</li>
+              <li>Rule-based FloodGuard Risk Intelligence with rapid-rise &amp; blocked storm-drain diagnostics.</li>
+              <li>Optional server-side Gemini AI FloodGuard Assistant (when running with Node/Express backend and server-side <code>GEMINI_API_KEY</code>).</li>
+              <li>6-stage classroom Demo Mode, Supabase Auth + RLS Admin Settings, and NYC FloodNet historical archive + bookmarks.</li>
             </ul>
           </div>
           <div>
-            <h3 class="sub-heading status-text-warn">Planned / Requires Hardware or Setup</h3>
+            <h3 class="sub-heading status-text-warn">Requires Configuration / Planned</h3>
             <ul class="clean-list">
-              <li><strong>Wi-Fi Cloud Sync (Unfinished):</strong> Direct automatic upload from Arduino GIGA R1 WiFi to Supabase tables over Wi-Fi.</li>
-              <li><strong>Automatic Pump Control (Planned):</strong> Relay driver circuit &amp; safety interlock firmware (pumps are currently manual).</li>
-              <li><strong>Servo Flood Barrier (Optional Future):</strong> Firmware hook included (<code>ENABLE_SERVO_BARRIER</code>), not required for primary demo.</li>
-              <li><strong>GIGA Display Shield UI (Planned):</strong> On-device local readout screen mirroring serial depth &amp; warnings.</li>
+              <li><strong>AI Assistant on Static Hosting:</strong> Requires the Node/Express server runtime + <code>GEMINI_API_KEY</code> (static GitHub Pages disables AI calls honestly).</li>
+              <li><strong>Wi-Fi Cloud Sync (Planned):</strong> Direct automatic upload from Arduino GIGA R1 WiFi to Supabase over Wi-Fi.</li>
+              <li><strong>Automatic Pump Control (Planned):</strong> Relay driver circuit &amp; safety interlock firmware (5V pumps are currently operated manually).</li>
+              <li><strong>Real-World Flood Validation:</strong> Thresholds (0.50 cm / 1.25 cm) are calibrated for the miniature 3D-printed street model, not validated for full-scale NYC streets.</li>
             </ul>
           </div>
         </div>

@@ -1,71 +1,90 @@
 /**
  * ============================================================================
- * NYC FloodGuard — Reliable Ultrasonic Signal Validation, Noise Filtering,
- *                  Statistical Trend Detection & Early-Warning ETA Engine
+ * NYC FloodGuard 2.0 — Reliable Ultrasonic Signal Validation, Noise Filtering,
+ *                      Statistical Trend Detection & Early-Warning ETA Engine
  * File: floodAnalytics.js
+ *
+ * Calibrated for the tested 3D-printed NYC street prototype:
+ *   - Default dry-road baseline: ~14.39 cm (auto-calibrated from Arduino serial)
+ *   - Experimental alert thresholds:
+ *       NORMAL:   < 0.50 cm
+ *       WARNING:  0.50 – 1.24 cm
+ *       CRITICAL: >= 1.25 cm
+ *   - Also supports Admin-configured thresholds from Supabase `monitoring_settings`
+ *     and larger deep-basin setups.
  *
  * Key Guarantees:
  *   1. Mathematical Consistency:
- *      - Raw Depth (cm)      = Mount Height - Raw Distance (when valid)
  *      - Filtered Depth (cm) = clamp(Mount Height - Filtered Distance, >= 0)
- *      Filtered Distance and Filtered Depth ALWAYS match exact subtraction.
  *   2. Out-of-Range Protection:
- *      - Distances < 2.0 cm (HC-SR04 blind zone) or > Mount Height + 2.0 cm
- *        (physically beyond dry street floor) or ultrasonic timeouts are
- *        flagged OUT_OF_RANGE and are NEVER interpreted as 0.0 cm water depth.
- *   3. Isolated Spike Rejection & Causal Noise Filtering:
- *      - Rejects single-frame sudden jumps (> 3.0 cm from recent median) until
- *        confirmed by 2 consecutive consistent readings.
- *      - Uses a causal odd-sized trailing median (3 or 5 valid samples) on
- *        measured distance so the newest reading never suffers 2-sample
- *        averaging jump artifacts.
- *   4. Sensor Quality Classification:
- *      - GOOD | UNSTABLE | OUT_OF_RANGE | UNAVAILABLE
- *   5. Statistically Reliable Trend & Strict ETA Gating:
- *      - Trend: RISING | FALLING | STABLE | UNCERTAIN | UNAVAILABLE
- *      - Rising / Falling require Sensor Quality === GOOD, sufficient span,
- *        R^2 >= 0.65, t-statistic >= 2.5, and net delta >= 0.25 cm.
- *      - Early-warning ETA is NEVER displayed when sensor quality is not GOOD
- *        or when water is not rising reliably.
+ *      - Distances < 2.0 cm (HC-SR04 blind zone), > Mount Height + 2.0 cm, or
+ *        timeouts are flagged OUT_OF_RANGE and NEVER displayed as 0.00 cm depth.
+ *   3. Spike Rejection & Causal Median Filtering (with confirmed step-shift reset)
+ *   4. Sensor Quality Classification: GOOD | UNSTABLE | OUT_OF_RANGE | UNAVAILABLE
+ *   5. Statistically Reliable Trend & Strict ETA Gating
  * ============================================================================
  */
 
+export const PROTOTYPE_PRESETS = {
+  EXPERIMENTAL_STREET_MODEL: {
+    label: 'Miniature Street Model (0.50 / 1.25 cm)',
+    mountHeightCm: 14.39,
+    warnThresholdCm: 0.50,
+    critThresholdCm: 1.25,
+    minRiseRateCmPerMin: 0.12,
+    stableBandCmPerMin: 0.06,
+    barrierThresholdCm: 1.00
+  },
+  DEEP_BASIN_MODEL: {
+    label: 'Deep Basin Calibration (6.0 / 12.0 cm)',
+    mountHeightCm: 25.0,
+    warnThresholdCm: 6.0,
+    critThresholdCm: 12.0,
+    minRiseRateCmPerMin: 0.25,
+    stableBandCmPerMin: 0.20,
+    barrierThresholdCm: 10.0
+  }
+};
+
 export const DEFAULT_PROTOTYPE_SETTINGS = {
-  mountHeightCm: 25.0,          // Physical distance from ultrasonic face to dry street surface
-  warnThresholdCm: 6.0,         // Configurable prototype Warning level (Orange)
-  critThresholdCm: 12.0,        // Configurable prototype Critical level (Red)
-  minRiseRateCmPerMin: 0.25,    // Minimum slope (cm/min) required for Rising / Falling
-  stableBandCmPerMin: 0.20,     // Slope deadband (±cm/min) for Stable classification
-  barrierThresholdCm: 10.0,     // Optional future servo flood barrier trigger threshold
-  staleTimeoutMs: 8000,         // Live serial timeout before showing UNAVAILABLE
+  mountHeightCm: 14.39,         // Auto-calibrated dry-road baseline on tested miniature NYC street
+  warnThresholdCm: 0.50,        // Experimental Warning level (Amber: 0.50–1.24 cm)
+  critThresholdCm: 1.25,        // Experimental Critical level (Red: >= 1.25 cm)
+  minRiseRateCmPerMin: 0.12,    // Minimum slope (cm/min) required for Rising / Falling
+  stableBandCmPerMin: 0.06,     // Slope deadband (±cm/min) for Stable classification
+  barrierThresholdCm: 1.00,     // Optional future servo flood barrier trigger threshold
+  staleTimeoutMs: 10000,        // Live serial timeout before showing UNAVAILABLE
   minValidDistanceCm: 2.0,      // HC-SR04 minimum physical sensing range
   dryToleranceCm: 2.0,          // Small acoustic noise allowance beyond dry floor before OUT_OF_RANGE
   spikeJumpCm: 3.0,             // Single-frame jump threshold vs. trailing median
-  maxGoodResidualStdCm: 0.45,   // Max regression residual std dev (cm) for GOOD quality
+  maxGoodResidualStdCm: 0.35,   // Max regression residual std dev (cm) for GOOD quality
   maxGoodBurstSpreadCm: 2.5     // Max firmware 5-ping burst spread (cm) for GOOD quality
 };
 
 /**
  * Validates a raw ultrasonic distance measurement against physical HC-SR04
- * limits and the configured sensor mounting height.
- * Never converts out-of-range measurements into 0.0 cm water depth.
+ * limits and the sensor's dry-road mounting height.
+ * Never converts out-of-range measurements into 0.00 cm water depth.
  */
-export function validateDistanceReading(mountHeightCm, measuredDistanceCm, settings = DEFAULT_PROTOTYPE_SETTINGS, errorCode = null) {
+export function validateDistanceReading(
+  mountHeightCm,
+  measuredDistanceCm,
+  settings = DEFAULT_PROTOTYPE_SETTINGS,
+  errorCode = null
+) {
   const cfg = { ...DEFAULT_PROTOTYPE_SETTINGS, ...settings };
   const mount = Number(mountHeightCm);
   const dist = measuredDistanceCm != null ? Number(measuredDistanceCm) : NaN;
 
-  // Always reject ultrasonic timeouts or non-range hardware errors immediately.
-  // For "out_of_range" packets that still include a finite measured distance, continue below
-  // so rawDistanceCm is preserved for display and validated against the active mountHeightCm.
   if (errorCode && (errorCode !== 'out_of_range' || !Number.isFinite(dist))) {
     return {
       valid: false,
-      reason: errorCode === 'ultrasonic_timeout'
-        ? 'Ultrasonic echo timeout (no valid return pulse)'
-        : errorCode === 'out_of_range'
-        ? 'Ultrasonic reading reported out of range by firmware'
-        : `Sensor reported error: ${errorCode}`,
+      reason:
+        errorCode === 'ultrasonic_timeout'
+          ? 'Ultrasonic echo timeout (no valid return pulse)'
+          : errorCode === 'out_of_range'
+          ? 'Ultrasonic reading reported out of range by firmware'
+          : `Sensor reported error: ${errorCode}`,
       rawDistanceCm: Number.isFinite(dist) ? Number(dist.toFixed(2)) : null,
       rawDepthCm: null
     };
@@ -92,7 +111,7 @@ export function validateDistanceReading(mountHeightCm, measuredDistanceCm, setti
   if (dist < cfg.minValidDistanceCm) {
     return {
       valid: false,
-      reason: `Measured distance (${dist.toFixed(1)} cm) is below HC-SR04 minimum range (${cfg.minValidDistanceCm.toFixed(1)} cm)`,
+      reason: `Measured distance (${dist.toFixed(2)} cm) is below HC-SR04 minimum range (${cfg.minValidDistanceCm.toFixed(1)} cm)`,
       rawDistanceCm: Number(dist.toFixed(2)),
       rawDepthCm: null
     };
@@ -102,15 +121,12 @@ export function validateDistanceReading(mountHeightCm, measuredDistanceCm, setti
   if (dist > maxValidDist) {
     return {
       valid: false,
-      reason: `Measured distance (${dist.toFixed(1)} cm) exceeds dry street floor (${mount.toFixed(1)} cm + ${cfg.dryToleranceCm.toFixed(1)} cm tolerance)`,
+      reason: `Measured distance (${dist.toFixed(2)} cm) exceeds dry street floor (${mount.toFixed(2)} cm + ${cfg.dryToleranceCm.toFixed(1)} cm tolerance)`,
       rawDistanceCm: Number(dist.toFixed(2)),
       rawDepthCm: null
     };
   }
 
-  // Within valid physical bounds:
-  // If dist is slightly above mountHeightCm (within dryToleranceCm, e.g. 25.4 cm on 25.0 cm mount),
-  // rawDepthDiff is slightly negative (-0.4 cm), clamped to 0.0 cm dry floor.
   const exactDiff = Number((mount - dist).toFixed(2));
   const clampedDepth = Math.max(0, exactDiff);
 
@@ -124,11 +140,6 @@ export function validateDistanceReading(mountHeightCm, measuredDistanceCm, setti
   };
 }
 
-/**
- * Pure helper kept for direct formula verification:
- * Water Depth = Sensor Mounting Height − Measured Distance to Water
- * Returns null if distance is physically out of range (never fakes 0.0 cm).
- */
 export function computeWaterDepthCm(mountHeightCm, measuredDistanceCm, settings = DEFAULT_PROTOTYPE_SETTINGS) {
   const check = validateDistanceReading(mountHeightCm, measuredDistanceCm, settings);
   return check.valid ? check.rawDepthCm : null;
@@ -150,11 +161,8 @@ function standardDeviation(values) {
 }
 
 /**
- * Processes the raw packet stream (including out-of-range frames and spikes)
- * to produce:
- *   - Per-packet validity & isolated spike flags
- *   - Causal odd-sized trailing median on valid non-spike distances (3 or 5 samples)
- *   - Mathematically consistent filteredDistanceCm & filteredDepthCm
+ * Processes raw telemetry packets (supporting both Arduino on-device filtered text packets
+ * and raw/JSON packets) to produce mathematically consistent filtered values and quality flags.
  */
 export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_SETTINGS) {
   const cfg = { ...DEFAULT_PROTOTYPE_SETTINGS, ...settings };
@@ -170,9 +178,9 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
   }
 
   const processedPackets = [];
-  const acceptedDistances = []; // Clean non-spike valid distances for trailing median
+  let acceptedDistances = [];
   const validFilteredSeries = [];
-  let pendingJumpCandidate = null; // Allows 2 consecutive readings to confirm a real rapid shift
+  let pendingJumpCandidate = null;
 
   for (let i = 0; i < rawPackets.length; i++) {
     const pkt = rawPackets[i];
@@ -190,6 +198,8 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
         isOutOfRange: true,
         isSpike: false,
         invalidReason: validation.reason,
+        reportedStatus: pkt.reportedStatus || null,
+        packetFormat: pkt.format || 'json',
         burstSpreadCm: pkt.burstSpreadCm ?? null,
         validPings: pkt.validPings ?? null,
         firmwareQuality: pkt.firmwareQuality || null
@@ -197,7 +207,7 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
       continue;
     }
 
-    // Isolated spike detection against recent trailing median (once we have >= 3 accepted points)
+    // Isolated spike detection against recent trailing median (once >= 3 accepted points exist)
     let isSpike = false;
     let spikeReason = '';
     if (acceptedDistances.length >= 3) {
@@ -206,17 +216,16 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
       const jump = Math.abs(validation.rawDistanceCm - refMedianDist);
 
       if (jump > cfg.spikeJumpCm) {
-        // Check if previous frame was also near this new level (confirming a real rapid change)
         if (
           pendingJumpCandidate != null &&
           Math.abs(validation.rawDistanceCm - pendingJumpCandidate) <= cfg.spikeJumpCm * 0.6
         ) {
-          // Confirmed sustained shift — accept both points cleanly
+          // Confirmed sustained step shift — reset baseline to new level
           pendingJumpCandidate = null;
+          acceptedDistances = [validation.rawDistanceCm];
         } else {
-          // Treat first sudden jump as an isolated spike candidate and reject it
           isSpike = true;
-          spikeReason = `Isolated jump of ${jump.toFixed(1)} cm vs. recent median (${refMedianDist.toFixed(1)} cm) rejected`;
+          spikeReason = `Isolated jump of ${jump.toFixed(2)} cm vs. recent median (${refMedianDist.toFixed(2)} cm) rejected`;
           pendingJumpCandidate = validation.rawDistanceCm;
         }
       } else {
@@ -227,10 +236,13 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
     if (!isSpike) {
       acceptedDistances.push(validation.rawDistanceCm);
 
-      // Causal 3-sample trailing median once >= 3 clean points exist (1-sample lag,
-      // rejects any sub-spike single-frame ripple completely, zero 2-sample averaging artifact)
+      // Arduino text serial lines ("Distance: ... | Water Depth: ... | Status: ...") are
+      // already median-filtered on the microcontroller, so avoid double-median lag (which
+      // would misalign displayed depth with the Arduino's confirmed status). Keep the
+      // 3-sample causal median filter for raw JSON streams.
       const nAcc = acceptedDistances.length;
-      const winSize = nAcc >= 3 ? 3 : 1;
+      const isPreFilteredText = pkt.format === 'text';
+      const winSize = isPreFilteredText ? 1 : nAcc >= 3 ? 3 : 1;
       const trailingSlice = acceptedDistances.slice(-winSize);
       const filteredDistanceCm = Number(medianOf(trailingSlice).toFixed(2));
       const filteredDepthCm = Math.max(0, Number((mount - filteredDistanceCm).toFixed(2)));
@@ -247,6 +259,8 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
         isOutOfRange: false,
         isSpike: false,
         invalidReason: '',
+        reportedStatus: pkt.reportedStatus || null,
+        packetFormat: pkt.format || 'json',
         burstSpreadCm: pkt.burstSpreadCm ?? null,
         validPings: pkt.validPings ?? null,
         firmwareQuality: pkt.firmwareQuality || null
@@ -254,7 +268,6 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
       processedPackets.push(entry);
       validFilteredSeries.push(entry);
     } else {
-      // Spike frame: record for quality accounting, do NOT pollute validFilteredSeries
       processedPackets.push({
         timestampMs: pkt.timestampMs,
         mountHeightCm: Number(mount.toFixed(2)),
@@ -266,6 +279,8 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
         isOutOfRange: false,
         isSpike: true,
         invalidReason: spikeReason,
+        reportedStatus: pkt.reportedStatus || null,
+        packetFormat: pkt.format || 'json',
         burstSpreadCm: pkt.burstSpreadCm ?? null,
         validPings: pkt.validPings ?? null,
         firmwareQuality: pkt.firmwareQuality || null
@@ -273,14 +288,12 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
     }
   }
 
-  // Count consecutive trailing out-of-range packets
   let consecutiveOutOfRange = 0;
   for (let i = processedPackets.length - 1; i >= 0; i--) {
     if (processedPackets[i].isOutOfRange) consecutiveOutOfRange++;
     else break;
   }
 
-  // Recent quality window (last 8 packets)
   const recentWindow = processedPackets.slice(-8);
   const recentOutOfRangeCount = recentWindow.filter((p) => p.isOutOfRange).length;
   const recentSpikeCount = recentWindow.filter((p) => p.isSpike).length;
@@ -295,10 +308,6 @@ export function processTelemetryBuffer(rawPackets, settings = DEFAULT_PROTOTYPE_
   };
 }
 
-/**
- * Ordinary Least Squares (OLS) linear regression over filtered depths vs. time
- * with R^2, residual standard deviation, standard error of slope, and t-statistic.
- */
 function computeStatisticalTrend(series) {
   const n = series.length;
   if (n < 3) {
@@ -328,7 +337,7 @@ function computeStatisticalTrend(series) {
     };
   }
 
-  const xs = series.map((s) => (s.timestampMs - t0) / 60000); // minutes
+  const xs = series.map((s) => (s.timestampMs - t0) / 60000);
   const ys = series.map((s) => s.filteredDepthCm);
 
   const meanX = xs.reduce((a, b) => a + b, 0) / n;
@@ -401,8 +410,6 @@ function projectThresholdEta(currentDepthCm, thresholdCm, slopeCmPerMin, allowEt
     return { available: false, reached: false, seconds: null, label: 'Not available' };
   }
   if (!allowEta) {
-    // When measurements are unreliable/out of range, NEVER invent an ETA.
-    // Still report if already reached ONLY when currentDepthCm is trusted (handled by caller).
     return { available: false, reached: false, seconds: null, label: 'Not available' };
   }
   if (currentDepthCm >= thresholdCm) {
@@ -424,9 +431,6 @@ function projectThresholdEta(currentDepthCm, thresholdCm, slopeCmPerMin, allowEt
   };
 }
 
-/**
- * Full reliability-hardened telemetry analysis for NYC FloodGuard Dashboard.
- */
 export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_SETTINGS, sourceMode = 'UNAVAILABLE') {
   const cfg = { ...DEFAULT_PROTOTYPE_SETTINGS, ...settings };
 
@@ -439,6 +443,7 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
       sensorQualityReason: 'No active sensor stream connected',
       status: 'UNAVAILABLE',
       statusLabel: 'UNAVAILABLE',
+      statusSource: 'none',
       trend: 'UNAVAILABLE',
       trendLabel: 'Unavailable',
       trendDetail: 'Waiting for timestamped measurements',
@@ -471,8 +476,6 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     latestPacket
   } = processed;
 
-  // Case A: No valid readings at all, or >= 2 consecutive out-of-range packets
-  // -> NEVER display 0.0 cm water depth or NORMAL status!
   if (validFilteredSeries.length === 0 || consecutiveOutOfRange >= 2) {
     const mountVal = latestPacket?.mountHeightCm ?? cfg.mountHeightCm;
     return {
@@ -482,9 +485,10 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
       sensorQualityLabel: 'Out of Range',
       sensorQualityReason:
         latestPacket?.invalidReason ||
-        'Ultrasonic readings are out of valid physical range (not interpreted as 0 cm)',
+        'Ultrasonic readings are out of valid physical range (not interpreted as 0.00 cm)',
       status: 'OUT_OF_RANGE',
       statusLabel: 'OUT OF RANGE',
+      statusSource: 'validation',
       trend: 'UNCERTAIN',
       trendLabel: 'Uncertain',
       trendDetail: 'Ultrasonic measurements are out of range — check sensor alignment and wiring',
@@ -513,16 +517,13 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
   const filteredDistanceCm = latestValid.filteredDistanceCm;
   const mountHeightCm = latestValid.mountHeightCm;
 
-  // Compute statistical trend over recent filtered samples (up to last 10 stabilized samples
-  // so the initial 2 warm-up frames with winSize=1 don't bias the ramp slope once >= 7 points exist)
   const stabilizedSeries =
     validFilteredSeries.length >= 7
       ? validFilteredSeries.filter((s) => s.filterWindowSize === 3)
       : validFilteredSeries;
-  const rollingWindow = (stabilizedSeries.length >= 5 ? stabilizedSeries : validFilteredSeries).slice(-10);
+  const rollingWindow = (stabilizedSeries.length >= 4 ? stabilizedSeries : validFilteredSeries).slice(-10);
   const stats = computeStatisticalTrend(rollingWindow);
 
-  // Measure true raw-signal noise (detrended around a linear ramp so fast clean rising/falling water is never penalized for median filter lag)
   const rawSeriesForNoise = rollingWindow.map((s) => ({
     timestampMs: s.timestampMs,
     filteredDepthCm: s.rawDepthCm
@@ -530,7 +531,6 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
   const rawNoiseStats = computeStatisticalTrend(rawSeriesForNoise);
   const rawNoiseStdCm = rawNoiseStats.residualStdCm;
 
-  // Evaluate Sensor Quality: GOOD | UNSTABLE | OUT_OF_RANGE
   let sensorQuality = 'GOOD';
   let sensorQualityLabel = 'Good';
   let sensorQualityReason = 'Consistent ultrasonic echoes within calibrated range';
@@ -561,7 +561,7 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     } else if (latestTooFewPings) {
       sensorQualityReason = `Only ${latestPacket.validPings}/5 ultrasonic pings returned valid echoes`;
     } else if (latestBurstTooNoisy) {
-      sensorQualityReason = `High echo spread within burst (${latestPacket.burstSpreadCm.toFixed(1)} cm)`;
+      sensorQualityReason = `High echo spread within burst (${latestPacket.burstSpreadCm.toFixed(2)} cm)`;
     } else if (recentOutOfRangeCount >= 2 || recentSpikeCount >= 2) {
       sensorQualityReason = `Intermittent echoes (${recentSpikeCount} spike, ${recentOutOfRangeCount} out-of-range in recent window)`;
     } else {
@@ -569,18 +569,17 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     }
   }
 
-  // Evaluate raw reading status label
   const rawReadingStatus = latestPacket?.isOutOfRange
     ? 'OUT_OF_RANGE'
     : latestPacket?.isSpike
     ? 'SPIKE_REJECTED'
     : 'VALID';
 
-  // Statistically reliable trend classification (NEVER claim drainage pump is running)
-  const enoughData = rollingWindow.length >= 5 && stats.spanSec >= 4.0;
-  const stableBand = Math.max(0.08, Number(cfg.stableBandCmPerMin) || 0.2);
-  const minSlope = Math.max(stableBand, Number(cfg.minRiseRateCmPerMin) || 0.25);
-  const minNetDeltaCm = 0.25;
+  // Statistically reliable trend classification (scaled cleanly for miniature street model depths)
+  const enoughData = rollingWindow.length >= 4 && stats.spanSec >= 3.0;
+  const stableBand = Math.max(0.05, Number(cfg.stableBandCmPerMin) || 0.06);
+  const minSlope = Math.max(stableBand, Number(cfg.minRiseRateCmPerMin) || 0.12);
+  const minNetDeltaCm = Math.min(0.25, Math.max(0.08, (cfg.critThresholdCm - cfg.warnThresholdCm) * 0.12));
 
   let trend = 'STABLE';
   let trendLabel = 'Stable';
@@ -598,23 +597,23 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
   } else if (!enoughData) {
     trend = 'UNCERTAIN';
     trendLabel = 'Collecting baseline…';
-    trendDetail = `Need at least 5 clean samples over 4s (${rollingWindow.length}/5 collected)`;
+    trendDetail = `Need at least 4 clean samples over 3s (${rollingWindow.length}/4 collected)`;
   } else {
-    const statReliable = stats.rSquared >= 0.65 && stats.tStat >= 2.5;
+    const statReliable = stats.rSquared >= 0.65 && stats.tStat >= 2.2;
     if (stats.slopeCmPerMin >= minSlope && stats.netDeltaCm >= minNetDeltaCm && statReliable) {
       trend = 'RISING';
       trendLabel = 'Rising Water';
-      trendDetail = `Statistically reliable upward trend (R² = ${stats.rSquared.toFixed(2)}, Δ = +${stats.netDeltaCm.toFixed(1)} cm)`;
+      trendDetail = `Reliable upward trend (R² = ${stats.rSquared.toFixed(2)}, Δ = +${stats.netDeltaCm.toFixed(2)} cm)`;
       isReliableRise = true;
     } else if (stats.slopeCmPerMin <= -minSlope && stats.netDeltaCm <= -minNetDeltaCm && statReliable) {
       trend = 'FALLING';
       trendLabel = 'Falling Water';
-      trendDetail = `Water level is decreasing (R² = ${stats.rSquared.toFixed(2)}, Δ = ${stats.netDeltaCm.toFixed(1)} cm; drainage-pump operation is not monitored)`;
+      trendDetail = `Water level is receding (R² = ${stats.rSquared.toFixed(2)}, Δ = ${stats.netDeltaCm.toFixed(2)} cm)`;
       isReliableFall = true;
     } else if (
       Math.abs(stats.slopeCmPerMin) < stableBand &&
       Math.abs(stats.netDeltaCm) < minNetDeltaCm &&
-      stats.residualStdCm <= 0.35
+      stats.residualStdCm <= 0.30
     ) {
       trend = 'STABLE';
       trendLabel = 'Stable';
@@ -626,25 +625,27 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     }
   }
 
-  // Evaluate flood warning status from trusted filtered water depth
+  // Evaluate flood status:
+  // If Arduino sent a confirmed status in its text serial line (e.g. "Status: WARNING"),
+  // honor it directly; otherwise compute from active threshold configuration.
   let status = 'NORMAL';
-  let statusLabel = 'NORMAL';
-  if (filteredDepthCm >= cfg.critThresholdCm) {
+  let statusSource = 'thresholds';
+  if (latestValid.packetFormat === 'text' && latestValid.reportedStatus) {
+    status = latestValid.reportedStatus;
+    statusSource = 'arduino_confirmed';
+  } else if (filteredDepthCm >= cfg.critThresholdCm) {
     status = 'CRITICAL';
-    statusLabel = 'CRITICAL';
   } else if (filteredDepthCm >= cfg.warnThresholdCm) {
     status = 'WARNING';
-    statusLabel = 'WARNING';
   }
 
-  // Strict ETA gating: NEVER project ETA when sensor quality != GOOD or rise is not statistically reliable
   const etaWarning =
-    sensorQuality === 'GOOD' && filteredDepthCm >= cfg.warnThresholdCm
+    sensorQuality === 'GOOD' && (filteredDepthCm >= cfg.warnThresholdCm || status === 'WARNING' || status === 'CRITICAL')
       ? { available: true, reached: true, seconds: 0, label: 'Threshold reached' }
       : projectThresholdEta(filteredDepthCm, cfg.warnThresholdCm, stats.slopeCmPerMin, sensorQuality === 'GOOD' && isReliableRise);
 
   const etaCritical =
-    sensorQuality === 'GOOD' && filteredDepthCm >= cfg.critThresholdCm
+    sensorQuality === 'GOOD' && (filteredDepthCm >= cfg.critThresholdCm || status === 'CRITICAL')
       ? { available: true, reached: true, seconds: 0, label: 'Threshold reached' }
       : projectThresholdEta(filteredDepthCm, cfg.critThresholdCm, stats.slopeCmPerMin, sensorQuality === 'GOOD' && isReliableRise);
 
@@ -655,14 +656,13 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
     sensorQualityLabel,
     sensorQualityReason,
     status,
-    statusLabel,
+    statusLabel: status,
+    statusSource,
     trend,
     trendLabel,
     trendDetail,
-    // Mathematically consistent filtered values: filteredDepthCm === max(0, mountHeightCm - filteredDistanceCm)
     filteredDepthCm,
     filteredDistanceCm,
-    // Clearly separated latest raw measurement
     rawDepthCm: latestPacket?.rawDepthCm ?? null,
     rawDistanceCm: latestPacket?.rawDistanceCm ?? null,
     rawReadingStatus,

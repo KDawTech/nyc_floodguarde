@@ -40,11 +40,11 @@
   --normal-100: #DCFCE7;
   --normal-50:  #F0FDF4;
 
-  --warn-700: #C2410C;
-  --warn-600: #EA580C;
-  --warn-500: #F97316;
-  --warn-100: #FFEDD5;
-  --warn-50:  #FFF7ED;
+  --warn-700: #B45309;
+  --warn-600: #D97706;
+  --warn-500: #F59E0B;
+  --warn-100: #FEF3C7;
+  --warn-50:  #FFFBEB;
 
   --crit-700: #B91C1C;
   --crit-600: #DC2626;
@@ -763,12 +763,35 @@ code {
 /* ==========================================================================
    5. Section 2: FloodGuard Monitoring Dashboard
    ========================================================================== */
+.connection-controls-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
 .connection-controls {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
 }
+
+.serial-hint-text {
+  font-size: 0.76rem;
+  color: var(--gray-500);
+  text-align: right;
+}
+
+.meta-status-text {
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.quality-text-good { color: var(--normal-700); }
+.quality-text-unstable { color: var(--warn-700); }
+.quality-text-out-of-range { color: var(--crit-700); }
+.quality-text-unavailable { color: var(--gray-500); }
 
 .source-indicator {
   font-family: var(--font-mono);
@@ -799,25 +822,47 @@ code {
   color: var(--cyan-300);
 }
 
-/* Sensor Quality Indicators (Good / Unstable / Out of Range / Unavailable) */
-.quality-good {
-  background: var(--normal-100);
-  color: var(--normal-700);
+/* Active Flood Status Alert Banner */
+.alert-banner {
+  border-radius: var(--radius-md);
+  padding: 14px 18px;
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  border: 1px solid transparent;
 }
 
-.quality-unstable {
-  background: var(--warn-100);
+.alert-banner-warning {
+  background: var(--warn-50);
+  border-color: rgba(217, 119, 6, 0.45);
   color: var(--warn-700);
 }
 
-.quality-out-of-range {
-  background: var(--crit-100);
+.alert-banner-critical {
+  background: var(--crit-50);
+  border-color: rgba(220, 38, 38, 0.5);
   color: var(--crit-700);
 }
 
-.quality-unavailable {
-  background: var(--gray-200);
-  color: var(--gray-700);
+.alert-banner-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.88rem;
+}
+
+.alert-banner-content strong {
+  font-size: 0.94rem;
+  letter-spacing: 0.01em;
+}
+
+.alert-banner-time {
+  font-size: 0.8rem;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .status-tag {
@@ -843,17 +888,29 @@ code {
   color: var(--warn-700);
 }
 
+.tag-crit {
+  background: var(--crit-100);
+  color: var(--crit-700);
+}
+
 .tag-neutral {
   background: var(--gray-100);
   color: var(--gray-700);
 }
 
+/* 6-Stage Classroom DEMO MODE Bar */
 .sim-strip {
   background: var(--warn-50);
-  border: 1px solid rgba(234, 88, 12, 0.35);
+  border: 1px solid rgba(217, 119, 6, 0.4);
   border-radius: var(--radius-md);
-  padding: 14px 18px;
+  padding: 16px 18px;
   margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sim-strip-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -876,10 +933,44 @@ code {
   flex-wrap: wrap;
 }
 
-/* Primary 5-Card Telemetry Grid */
-.telemetry-grid {
+.demo-stage-bar {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+
+.demo-stage-btn {
+  background: var(--white);
+  border: 1px solid rgba(217, 119, 6, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--gray-700);
+  cursor: pointer;
+  font-family: inherit;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.demo-stage-btn:hover {
+  background: var(--warn-100);
+  color: var(--navy-900);
+}
+
+.demo-stage-btn.active {
+  background: var(--navy-900);
+  border-color: var(--navy-900);
+  color: var(--white);
+}
+
+/* Primary Telemetry Hero Grid (Dominant Water Depth + 4 Operational Cards) */
+.telemetry-hero-grid {
+  display: grid;
+  grid-template-columns: 1.45fr 1fr 1fr 0.95fr 1.15fr;
   gap: 14px;
   margin-bottom: 20px;
 }
@@ -894,6 +985,56 @@ code {
   justify-content: space-between;
   gap: 8px;
   box-shadow: var(--shadow-sm);
+}
+
+.metric-card-hero {
+  background: var(--navy-900);
+  border-color: var(--navy-800);
+  color: var(--white);
+}
+
+.metric-card-hero .metric-label {
+  color: var(--cyan-300);
+}
+
+.metric-card-hero .metric-subtext {
+  color: var(--gray-300);
+}
+
+.metric-card-hero .raw-reading-subtext {
+  border-top-color: rgba(148, 163, 184, 0.25);
+  color: var(--gray-300);
+}
+
+.metric-card-hero .raw-reading-subtext.raw-reading-flagged {
+  color: #FCA5A5;
+}
+
+.metric-card-hero .raw-reading-subtext.raw-reading-spike {
+  color: #FCD34D;
+}
+
+.hero-depth-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.hero-depth-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 2.55rem;
+  font-weight: 800;
+  color: var(--white);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+
+.hero-depth-unit {
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--cyan-300);
 }
 
 .metric-label {
@@ -911,7 +1052,7 @@ code {
 .metric-value {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 1.95rem;
+  font-size: 1.9rem;
   font-weight: 700;
   color: var(--navy-900);
   line-height: 1.1;
@@ -932,7 +1073,7 @@ code {
 }
 
 .metric-trend-text {
-  font-size: 1.25rem;
+  font-size: 1.2rem;
   font-weight: 800;
   color: var(--navy-900);
   line-height: 1.2;
@@ -1105,12 +1246,359 @@ code {
   font-size: 0.88rem;
 }
 
-/* Secondary 2-Column Hardware + Settings Row */
+/* Secondary 2-Column Operational Panels */
 .dash-secondary-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
   align-items: start;
+}
+
+.dash-panel-gap {
+  margin-bottom: 20px;
+}
+
+/* FloodGuard Risk Intelligence Panel */
+.intel-source-split {
+  border-top: 1px solid var(--gray-200);
+  border-bottom: 1px solid var(--gray-200);
+  padding: 10px 0;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.intel-source-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.intel-source-label {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--gray-500);
+}
+
+.intel-source-value {
+  font-size: 0.8rem;
+  color: var(--navy-900);
+  font-weight: 600;
+}
+
+.intel-flags-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.intel-flag-box {
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.intel-flag-box.flag-active-warn {
+  background: var(--warn-50);
+  border-color: rgba(217, 119, 6, 0.4);
+}
+
+.intel-flag-box.flag-active-crit {
+  background: var(--crit-50);
+  border-color: rgba(220, 38, 38, 0.45);
+}
+
+.intel-flag-box.flag-ok {
+  background: var(--normal-50);
+  border-color: rgba(22, 163, 74, 0.35);
+}
+
+.intel-flag-title {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--gray-600);
+  margin-bottom: 2px;
+}
+
+.intel-flag-val {
+  font-size: 0.86rem;
+  font-weight: 800;
+  color: var(--navy-900);
+}
+
+.intel-flag-box.flag-active-warn .intel-flag-val { color: var(--warn-700); }
+.intel-flag-box.flag-active-crit .intel-flag-val { color: var(--crit-700); }
+.intel-flag-box.flag-ok .intel-flag-val { color: var(--normal-700); }
+
+.intel-drain-note {
+  font-size: 0.82rem;
+  color: var(--gray-700);
+  margin-bottom: 14px;
+  line-height: 1.45;
+}
+
+.intel-lists-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.intel-subhead {
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: var(--navy-900);
+  margin-bottom: 6px;
+}
+
+.intel-list {
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.81rem;
+  color: var(--gray-700);
+}
+
+.panel-disclaimer {
+  font-size: 0.75rem;
+  color: var(--gray-500);
+  border-top: 1px solid var(--gray-200);
+  padding-top: 10px;
+  line-height: 1.45;
+}
+
+/* Live NYC Weather Panel (Open-Meteo) */
+.weather-severity-strip {
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--gray-200);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.82rem;
+}
+
+.weather-sev-low {
+  background: var(--normal-50);
+  border-color: rgba(22, 163, 74, 0.35);
+  color: var(--normal-700);
+}
+
+.weather-sev-light {
+  background: var(--cyan-50);
+  border-color: rgba(8, 145, 178, 0.35);
+  color: var(--navy-900);
+}
+
+.weather-sev-moderate {
+  background: var(--warn-50);
+  border-color: rgba(217, 119, 6, 0.45);
+  color: var(--warn-700);
+}
+
+.weather-sev-severe {
+  background: var(--crit-50);
+  border-color: rgba(220, 38, 38, 0.5);
+  color: var(--crit-700);
+}
+
+.weather-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.weather-stat {
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.weather-stat-label {
+  font-size: 0.73rem;
+  font-weight: 700;
+  color: var(--gray-500);
+}
+
+.weather-stat-val {
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--navy-900);
+}
+
+.weather-chart-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.weather-chart-wrap {
+  height: 145px;
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.weather-chart-wrap canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.weather-hourly-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+
+.weather-hour-cell {
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 4px;
+  padding: 6px 4px;
+  text-align: center;
+  font-size: 0.72rem;
+}
+
+.weather-hour-time {
+  font-weight: 700;
+  color: var(--navy-900);
+}
+
+.weather-hour-rain {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--cyan-700);
+  font-weight: 700;
+}
+
+.weather-hour-prob {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--gray-500);
+}
+
+/* Alert Event History */
+.empty-inline-state {
+  background: var(--gray-50);
+  border: 1px dashed var(--gray-300);
+  border-radius: var(--radius-sm);
+  padding: 18px 14px;
+  text-align: center;
+  font-size: 0.84rem;
+  color: var(--gray-600);
+}
+
+.compact-table th,
+.compact-table td {
+  padding: 8px 10px;
+  font-size: 0.8rem;
+}
+
+.event-status-normal { color: var(--normal-700); font-weight: 700; }
+.event-status-warning { color: var(--warn-700); font-weight: 700; }
+.event-status-critical { color: var(--crit-700); font-weight: 700; }
+.event-status-other { color: var(--gray-700); font-weight: 700; }
+
+/* Optional AI FloodGuard Assistant */
+.ai-disclaimer-line {
+  font-size: 0.78rem;
+  color: var(--gray-600);
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+
+.ai-prompts-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.ai-prompt-btn {
+  background: var(--gray-50);
+  border: 1px solid var(--gray-300);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 0.77rem;
+  font-weight: 600;
+  color: var(--navy-900);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.ai-prompt-btn:hover:not(:disabled) {
+  background: var(--cyan-50);
+  border-color: var(--cyan-600);
+}
+
+.ai-input-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ai-input-form .form-control {
+  flex: 1;
+}
+
+.ai-messages-box {
+  margin-top: 12px;
+  max-height: 290px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ai-empty-msg {
+  font-size: 0.82rem;
+  color: var(--gray-500);
+  padding: 10px 0;
+}
+
+.ai-msg-item {
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--gray-50);
+}
+
+.ai-msg-q {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--navy-900);
+  margin-bottom: 6px;
+}
+
+.ai-msg-a {
+  font-size: 0.83rem;
+  color: var(--gray-800);
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+.ai-msg-meta {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: var(--gray-500);
+  font-family: var(--font-mono);
 }
 
 .spec-list {
@@ -1141,6 +1629,7 @@ code {
   color: var(--gray-700);
   text-align: right;
   font-size: 0.82rem;
+  word-break: break-word;
 }
 
 /* ==========================================================================
@@ -1474,11 +1963,14 @@ code {
    9. Responsive Breakpoints (Desktop, Tablet, Mobile)
    ========================================================================== */
 @media (max-width: 1120px) {
-  .telemetry-grid {
+  .telemetry-hero-grid {
     grid-template-columns: repeat(3, 1fr);
   }
-  .metric-card-eta {
+  .metric-card-hero {
     grid-column: span 2;
+  }
+  .demo-stage-bar {
+    grid-template-columns: repeat(3, 1fr);
   }
   .hardware-grid {
     grid-template-columns: repeat(2, 1fr);
@@ -1488,8 +1980,15 @@ code {
 @media (max-width: 920px) {
   .home-split,
   .dash-secondary-grid,
-  .about-grid-2 {
+  .about-grid-2,
+  .intel-lists-grid {
     grid-template-columns: 1fr;
+  }
+  .connection-controls-wrap {
+    align-items: flex-start;
+  }
+  .serial-hint-text {
+    text-align: left;
   }
   .kpi-strip-4 {
     grid-template-columns: repeat(2, 1fr);
@@ -1536,14 +2035,26 @@ code {
   .home-intro-card {
     padding: 22px;
   }
-  .telemetry-grid,
+  .telemetry-hero-grid,
   .kpi-strip-4,
   .hardware-grid,
-  .form-row-2 {
+  .form-row-2,
+  .intel-flags-grid,
+  .weather-metrics-grid {
     grid-template-columns: 1fr;
   }
-  .metric-card-eta {
+  .metric-card-hero {
     grid-column: span 1;
+  }
+  .demo-stage-bar {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .weather-hourly-strip {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .ai-input-form {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 

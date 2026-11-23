@@ -1,0 +1,8 @@
+{
+  "name": "NYC FloodGuard 2.0",
+  "description": "Intelligent urban flood monitoring and early-warning IoT prototype for New York City with Arduino GIGA R1 WiFi Web Serial telemetry, live Open-Meteo NYC weather, rule-based FloodGuard Risk Intelligence, optional server-side Gemini AI Assistant, Supabase Auth, and NYC FloodNet historical data.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
