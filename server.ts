@@ -155,14 +155,18 @@ function getGeminiClient(): GoogleGenAI | null {
 function buildSystemInstruction(): string {
   return [
     'You are the NYC FloodGuard 2.0 Informational Assistant.',
-    'Explain urban flood monitoring, storm-drain blockages, rainfall impacts on NYC drainage systems, and practical emergency preparedness actions for residents in clear, plain language.',
+    'Explain urban flood monitoring, storm-drain blockages, rainfall impacts on NYC drainage systems, sensor-mount reliability, and practical emergency preparedness actions for residents in clear, plain language.',
     'Always stay strictly honest and grounded in the telemetry and weather snapshot provided:',
-    '- Clearly distinguish four separate categories when answering: (1) Live Prototype Measurements (tabletop 3D-printed NYC street model with Arduino GIGA R1 WiFi + HC-SR04), (2) Live NYC Weather Forecasts (Open-Meteo), (3) Trend-Based Model Estimates (short-term linear ETA projections — not validated weather forecasts), and (4) General Resident Safety Guidance.',
-    '- Cite the actual measured values from the snapshot (water depth, distance, locked baseline, trend, rise rate, ETA/confidence, alert status, and NYC weather).',
+    '- Clearly distinguish four separate categories when answering: (1) Live Prototype Measurements (tabletop 3D-printed miniature NYC roadway with removable drain blockage, recirculating water pump, Arduino GIGA R1 WiFi, HC-SR04 ultrasonic sensor, ADXL345 accelerometer, active buzzer, and RGB LED), (2) Live NYC Weather Forecasts (Open-Meteo), (3) Trend-Based Model Estimates (short-term linear ETA projections — not validated weather forecasts), and (4) General Resident Safety Guidance.',
+    '- Synchronized miniature prototype thresholds: NORMAL < 0.25 cm (green LED, silent buzzer), WARNING 0.25 cm to below 0.60 cm (yellow LED, intermittent buzzer), CRITICAL >= 0.60 cm (red LED, continuous buzzer), and SENSOR_FAULT (flashing blue LED and fault alarm, unless a previously confirmed CRITICAL alarm remains active). Always treat Arduino-reported statuses as the source of truth.',
+    '- Cite only the actual values present in the snapshot (sensor validity, sensor reliability/quality, water depth, distance, locked baseline, ADXL345 mount stability and acceleration deviation, commanded local alarm mode, trend, rise rate, ETA/confidence, alert status, and NYC weather).',
+    '- If sensor validity indicates a SENSOR FAULT, MOUNT MOVEMENT, RECALIBRATION REQUIRED, CALIBRATING, CALIBRATION FAILED, or OUT OF RANGE, explain that measurements are invalid/stale and predictions are paused. NEVER describe a sensor error as 0.00 cm water depth or NORMAL.',
+    '- If a previously confirmed CRITICAL alert is being preserved during a sensor fault, emphasize that the critical warning remains active until confirmed safe by valid telemetry or visual inspection.',
+    '- Clearly distinguish the Arduino-commanded local Alarm Mode (RGB LED and active buzzer pattern) from independently verified physical LED illumination or buzzer audio.',
     '- If the dashboard is in DEMO MODE, explicitly state that readings are SIMULATED rather than live hardware.',
-    '- If no sensor is connected, the stream is stale/disconnected, or prediction shows Insufficient Data, say so honestly instead of inventing numbers.',
+    '- If no sensor is connected, mount/alarm telemetry is not reported by older firmware, the stream is stale/disconnected, or prediction shows Insufficient Data, say so honestly instead of inventing numbers, accuracy percentages, physical test outcomes, or predictions.',
     '- Provide practical resident safety actions appropriate to the situation (e.g., avoid flooded streets and basements, move to higher ground when needed, follow official NYC Emergency Management / Notify NYC instructions).',
-    '- Never claim NYC FloodGuard is an official NYC emergency dispatch or validated citywide forecasting service.',
+    '- Never claim NYC FloodGuard is an official NYC emergency warning system or validated citywide forecasting service.',
     '- Keep answers concise (3–6 short sentences or crisp bullet points) for live classroom demonstration.'
   ].join('\n');
 }
@@ -188,11 +192,49 @@ function formatContextBlock(context: Record<string, unknown> | undefined): strin
   if (context.streamHealth && context.streamHealth !== 'IDLE') {
     lines.push(`- Sensor Stream Health: ${clampString(context.streamHealth, 40)}`);
   }
-  if (context.status) lines.push(`- Confirmed Flood Status: ${clampString(context.status, 40)}`);
+  if (context.sensorValidity) {
+    const validityReason = context.sensorValidityReason
+      ? ` — ${clampString(context.sensorValidityReason, 180)}`
+      : '';
+    lines.push(`- Sensor Measurement Validity: ${clampString(context.sensorValidity, 60)}${validityReason}`);
+  }
+  if (typeof context.predictionsPaused === 'boolean') {
+    lines.push(`- Flood Predictions Status: ${context.predictionsPaused ? 'PAUSED (calibration protection / sensor fault)' : 'Active (subject to data sufficiency)'}`);
+  }
+  if (context.status) lines.push(`- Confirmed Flood Status: ${clampString(context.status, 50)}`);
   if (context.statusSource) lines.push(`- Status Source: ${clampString(context.statusSource, 60)}`);
 
+  if (context.preservedCriticalActive === true) {
+    const pDepth = formatNumber(context.preservedCriticalDepthCm);
+    lines.push(
+      `- Preserved Critical Alarm During Fault: ACTIVE${pDepth !== null ? ` (previously confirmed at ${pDepth} cm)` : ''}`
+    );
+  }
+
+  // ADXL345 Mount Stability
+  if (context.mountStatus) {
+    const devG = formatNumber(context.mountDeviationG, 3);
+    lines.push(
+      `- ADXL345 Sensor-Mount Stability: ${clampString(context.mountStatus, 40)}${devG !== null ? ` (Deviation: ${devG} g)` : ''}`
+    );
+  }
+
+  // Commanded Local Alarm Mode (RGB LED + Active Buzzer)
+  if (context.alarmMode) {
+    const desc = context.alarmModeDescription
+      ? ` — ${clampString(context.alarmModeDescription, 140)}`
+      : '';
+    lines.push(
+      `- Local Alarm Mode (Commanded by Arduino, not independently verified by light/audio sensors): ${clampString(context.alarmMode, 40)}${desc}`
+    );
+  }
+
   const depth = formatNumber(context.depthCm);
-  if (depth !== null) lines.push(`- Water Depth: ${depth} cm`);
+  if (depth !== null) {
+    lines.push(`- Available Water Depth: ${depth} cm`);
+  } else {
+    lines.push('- Available Water Depth: Not available (invalid, paused, or disconnected)');
+  }
 
   const distance = formatNumber(context.distanceCm);
   if (distance !== null) lines.push(`- Sensor-to-Surface Distance: ${distance} cm`);

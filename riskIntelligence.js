@@ -21,24 +21,29 @@ export function evaluateFloodRiskIntelligence({
   analysis,
   settings,
   weather,
-  sourceMode = 'UNAVAILABLE'
+  sourceMode = 'UNAVAILABLE',
+  hardwareProtection = null
 }) {
-  const warnCm = Number(settings?.warnThresholdCm ?? 0.5);
-  const critCm = Number(settings?.critThresholdCm ?? 1.25);
+  const warnCm = Number(settings?.warnThresholdCm ?? 0.25);
+  const critCm = Number(settings?.critThresholdCm ?? 0.60);
+
+  const protectionPaused = Boolean(hardwareProtection?.measurementsInvalid && sourceMode === 'LIVE');
+  const preservedCritical = Boolean(hardwareProtection?.preservedCriticalActive && sourceMode === 'LIVE');
 
   const hasObserved =
+    !protectionPaused &&
     Boolean(analysis && analysis.available && analysis.filteredDepthCm != null) &&
     sourceMode !== 'UNAVAILABLE';
   const hasWeather = Boolean(weather && weather.current && weather.summary);
 
   const depthCm = hasObserved ? Number(analysis.filteredDepthCm) : null;
   const rateCmPerMin = hasObserved && analysis.rateCmPerMin != null ? Number(analysis.rateCmPerMin) : null;
-  const status = hasObserved ? analysis.status : 'UNAVAILABLE';
+  const status = hasObserved ? analysis.status : preservedCritical ? 'CRITICAL' : 'UNAVAILABLE';
   const trend = hasObserved ? analysis.trend : 'UNAVAILABLE';
   const samples = hasObserved && Array.isArray(analysis.filteredSamples) ? analysis.filteredSamples : [];
 
   // 1. Rapid-Rise Detection (scaled relative to active prototype threshold span)
-  const rapidRiseThresholdCmPerMin = Math.max(0.35, Number(((critCm - warnCm) * 0.45).toFixed(2)));
+  const rapidRiseThresholdCmPerMin = Math.max(0.15, Number(((critCm - warnCm) * 0.45).toFixed(2)));
   const rapidRiseDetected =
     hasObserved &&
     analysis.sensorQuality === 'GOOD' &&
@@ -47,10 +52,6 @@ export function evaluateFloodRiskIntelligence({
     rateCmPerMin >= rapidRiseThresholdCmPerMin;
 
   // 2. Potential Blocked Storm Drain Detection (transparent physical rule)
-  // Triggered when:
-  //   (a) Water is at/above Warning depth and remains elevated without receding for >= 5 readings
-  //       (stable/non-draining pooling or still rising), OR
-  //   (b) Rapid rise is observed while water is already pooling (>= 60% of warning threshold)
   const recentSamples = samples.slice(-6);
   const sustainedElevatedCount = recentSamples.filter((s) => s.filteredDepthCm >= warnCm).length;
   const sustainedPoolingNotDraining =
@@ -65,7 +66,11 @@ export function evaluateFloodRiskIntelligence({
   const blockedDrainSuspected = Boolean(sustainedPoolingNotDraining || rapidPoolingOnStreet);
 
   let blockedDrainNote = '';
-  if (blockedDrainSuspected) {
+  if (protectionPaused) {
+    blockedDrainNote =
+      hardwareProtection.blockReason ||
+      'Drainage evaluation paused while sensor measurements are invalid or recalibration is required.';
+  } else if (blockedDrainSuspected) {
     if (trend === 'RISING' && depthCm >= critCm) {
       blockedDrainNote =
         'Water depth has exceeded the Critical threshold and continues rising — consistent with a severely obstructed storm drain unable to discharge inflow.';
@@ -97,7 +102,7 @@ export function evaluateFloodRiskIntelligence({
   let riskLabel = 'Low Risk';
   let trajectoryLabel = 'Stable';
 
-  if (!hasObserved && !hasWeather) {
+  if (!hasObserved && !hasWeather && !protectionPaused) {
     return {
       riskLevel: 'UNAVAILABLE',
       riskLabel: 'Awaiting Data',
@@ -119,7 +124,20 @@ export function evaluateFloodRiskIntelligence({
   }
 
   // Evaluate observed drivers
-  if (hasObserved) {
+  if (protectionPaused) {
+    drivers.push(
+      `Calibration protection active (${hardwareProtection.statusDisplay || 'PAUSED'}): ${hardwareProtection.blockReason}`
+    );
+    if (preservedCritical) {
+      const pDepth =
+        hardwareProtection.preservedCriticalDepthCm != null
+          ? ` (${hardwareProtection.preservedCriticalDepthCm.toFixed(2)} cm)`
+          : '';
+      drivers.push(
+        `Previously confirmed CRITICAL flood alarm${pDepth} is preserved during this sensor fault until fresh valid telemetry confirms safe levels.`
+      );
+    }
+  } else if (hasObserved) {
     const modeTag = sourceMode === 'LIVE' ? 'Observed Arduino sensor' : 'Demo Mode simulation';
     if (status === 'CRITICAL') {
       drivers.push(
@@ -178,10 +196,14 @@ export function evaluateFloodRiskIntelligence({
   }
 
   // Determine overall risk level
-  if (status === 'CRITICAL') {
+  if (preservedCritical || status === 'CRITICAL') {
     riskLevel = 'CRITICAL';
-    riskLabel = 'Critical Flood Risk';
-    trajectoryLabel = trend === 'FALLING' ? 'Peak Receding' : 'Escalating / Active Flood';
+    riskLabel = preservedCritical ? 'Critical Preserved (Sensor Fault)' : 'Critical Flood Risk';
+    trajectoryLabel = preservedCritical ? 'Fault — Critical Held' : trend === 'FALLING' ? 'Peak Receding' : 'Escalating / Active Flood';
+  } else if (protectionPaused) {
+    riskLevel = 'HIGH';
+    riskLabel = `Paused (${hardwareProtection.statusDisplay || 'Sensor Fault'})`;
+    trajectoryLabel = 'Paused — Calibration Protection';
   } else if (
     status === 'WARNING' ||
     rapidRiseDetected ||
@@ -205,7 +227,20 @@ export function evaluateFloodRiskIntelligence({
   }
 
   // Early-warning recommendations
-  if (riskLevel === 'CRITICAL') {
+  if (protectionPaused) {
+    if (preservedCritical) {
+      recommendations.push('Treat street flooding as CRITICAL until visual inspection or fresh valid sensor readings confirm water has receded.');
+    }
+    if (hardwareProtection?.blockCode === 'RECALIBRATION_REQUIRED' || hardwareProtection?.blockCode === 'CALIBRATION_FAILED') {
+      recommendations.push('Confirm the roadway is completely dry and the sensor mount is stationary, then recalibrate with the "c" command.');
+    } else if (hardwareProtection?.blockCode === 'SENSOR_FAULT') {
+      recommendations.push('Inspect HC-SR04 wiring and alignment; predictions remain paused until valid echoes resume.');
+    } else if (hardwareProtection?.blockCode === 'MOVEMENT_DETECTED') {
+      recommendations.push('Keep the sensor riser steady; predictions will reset and resume once the mount stabilizes and fresh telemetry arrives.');
+    } else {
+      recommendations.push('Wait for calibration completion and fresh valid telemetry before relying on trend predictions.');
+    }
+  } else if (riskLevel === 'CRITICAL') {
     recommendations.push('Issue immediate local street-flood alert: avoid walking or driving through standing water.');
     if (blockedDrainSuspected) {
       recommendations.push('Check storm-drain inlet for debris blockage (on prototype: clear removable drain blockage to verify recovery).');
@@ -234,7 +269,9 @@ export function evaluateFloodRiskIntelligence({
     }
   }
 
-  const observedSummary = hasObserved
+  const observedSummary = protectionPaused
+    ? `LIVE Arduino: ${hardwareProtection.statusDisplay || 'SENSOR FAULT'} — measurements invalid, predictions paused${preservedCritical ? ' (previously confirmed CRITICAL preserved)' : ''}`
+    : hasObserved
     ? `${sourceMode === 'LIVE' ? 'LIVE Arduino' : 'DEMO Simulation'}: ${depthCm.toFixed(2)} cm (${status}) · Trend: ${analysis.trendLabel}${rateCmPerMin != null ? ` (${rateCmPerMin > 0 ? '+' : ''}${rateCmPerMin.toFixed(2)} cm/min)` : ''}`
     : analysis?.status === 'OUT_OF_RANGE'
     ? 'Observed Sensor: OUT OF RANGE (invalid ultrasonic echo)'

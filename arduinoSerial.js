@@ -4,23 +4,37 @@
  * File: arduinoSerial.js
  *
  * Uses the browser Web Serial API (Chrome / Edge / Opera on desktop) to receive
- * live sensor readings over USB at 115200 baud and send manual commands (e.g. 'c'
- * for dry-road recalibration).
+ * live sensor readings over USB at 115200 baud and send manual commands ('c'
+ * for dry-road & stationary-mount recalibration).
  *
- * Supports BOTH serial output formats seamlessly:
+ * Supported Arduino GIGA R1 Serial Messages (115200 baud):
+ *   1. Ultrasonic water telemetry:
+ *      Distance: 15.42 cm | Water Depth: 0.00 cm | Status: NORMAL
+ *      Distance: 14.80 cm | Water Depth: 0.62 cm | Status: WARNING
+ *      Distance: 13.90 cm | Water Depth: 1.52 cm | Status: CRITICAL
+ *      SENSOR ERROR
  *
- *   1. Human-readable Arduino pipe-delimited format (authoritative depth & status):
- *      Distance: 14.39 cm | Water Depth: 0.00 cm | Status: NORMAL
- *      Distance: 13.36 cm | Water Depth: 1.03 cm | Status: WARNING
- *      Distance: 12.67 cm | Water Depth: 1.72 cm | Status: CRITICAL
+ *   2. ADXL345 mount stability telemetry:
+ *      Mount Status: STABLE | Deviation: 0.003 g
+ *      Mount Status: MOVEMENT_DETECTED | Deviation: 0.279 g
+ *      Mount Status: RECALIBRATION_REQUIRED | Deviation: 0.009 g
+ *      Mount Status: UNAVAILABLE
  *
- *   2. Explicit Arduino calibration status lines (on startup or after 'c' command):
- *      Dry Baseline: 14.05 cm
- *      Calibrated Baseline: 14.05 cm
- *      Recalibrating dry baseline...
+ *   3. Commanded local RGB LED + active buzzer alarm mode:
+ *      Alarm Mode: NORMAL
+ *      Alarm Mode: WARNING
+ *      Alarm Mode: CRITICAL
+ *      Alarm Mode: SENSOR_FAULT
+ *      Alarm Mode: CALIBRATING
  *
- *   3. Newline-delimited JSON format (nyc_floodguard_giga.ino):
- *      {"device":"GIGA-R1-WIFI","mount_height_cm":14.39,"distance_cm":13.36,"water_depth_cm":1.03,...}
+ *   4. Calibration lifecycle messages:
+ *      ADXL345 CALIBRATION COMPLETE
+ *      Calibration complete.
+ *      CALIBRATION FAILED
+ *      Dry Baseline: 15.42 cm / Calibrated Baseline: 15.42 cm
+ *
+ *   5. Backwards-compatible older firmware (ultrasonic lines without Mount/Alarm)
+ *      and newline-delimited JSON format.
  * ============================================================================
  */
 
@@ -38,32 +52,177 @@ function normalizeStatusToken(raw) {
   if (upper === 'NORMAL' || upper === 'OK' || upper === 'SAFE') return 'NORMAL';
   if (upper === 'WARNING' || upper === 'WARN' || upper === 'CAUTION') return 'WARNING';
   if (upper === 'CRITICAL' || upper === 'CRIT' || upper === 'DANGER' || upper === 'FLOOD') return 'CRITICAL';
+  if (upper === 'SENSOR_FAULT' || upper === 'SENSOR FAULT' || upper === 'SENSOR_ERROR' || upper === 'SENSOR ERROR') {
+    return 'SENSOR_FAULT';
+  }
   if (upper === 'OUT_OF_RANGE' || upper === 'OUT OF RANGE' || upper === 'ERROR' || upper === 'INVALID') {
     return 'OUT_OF_RANGE';
   }
   return null;
 }
 
+function normalizeMountStatusToken(raw) {
+  if (!raw) return null;
+  const upper = String(raw).trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if (upper === 'STABLE') return 'STABLE';
+  if (upper === 'MOVEMENT_DETECTED' || upper === 'MOVED' || upper === 'UNSTABLE') return 'MOVEMENT_DETECTED';
+  if (upper === 'RECALIBRATION_REQUIRED' || upper === 'NEEDS_RECALIBRATION') return 'RECALIBRATION_REQUIRED';
+  if (upper === 'UNAVAILABLE' || upper === 'OFFLINE' || upper === 'NOT_FOUND') return 'UNAVAILABLE';
+  return null;
+}
+
+function normalizeAlarmModeToken(raw) {
+  if (!raw) return null;
+  const upper = String(raw).trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if (upper === 'NORMAL') return 'NORMAL';
+  if (upper === 'WARNING') return 'WARNING';
+  if (upper === 'CRITICAL') return 'CRITICAL';
+  if (upper === 'SENSOR_FAULT' || upper === 'FAULT' || upper === 'ERROR') return 'SENSOR_FAULT';
+  if (upper === 'CALIBRATING' || upper === 'CALIBRATION') return 'CALIBRATING';
+  return null;
+}
+
 /**
- * Parses explicit Arduino calibration messages printed on startup or after sending 'c'.
- * Examples:
- *   "Calibrated Baseline: 14.05 cm"
- *   "Dry-road baseline set to 14.39 cm"
- *   "Dry Baseline = 14.12 cm"
+ * Parses standalone ultrasonic/hardware fault messages such as:
+ *   "SENSOR ERROR"
+ *   "Sensor Error: no echo"
+ * Never interprets a sensor error as 0.00 cm depth or NORMAL status.
+ */
+function parseSensorErrorLine(trimmed) {
+  if (!/^sensor\s+error\b/i.test(trimmed)) return null;
+  return {
+    format: 'sensor_error',
+    device: 'Arduino GIGA R1 WiFi',
+    distanceCm: null,
+    mountHeightCm: null,
+    inferredBaselineCm: null,
+    reportedDepthCm: null,
+    reportedStatus: 'SENSOR_FAULT',
+    errorCode: 'sensor_error',
+    firmwareQuality: 'out_of_range',
+    receivedAtMs: Date.now(),
+    rawLine: trimmed
+  };
+}
+
+/**
+ * Parses ADXL345 mount stability lines:
+ *   "Mount Status: STABLE | Deviation: 0.003 g"
+ *   "Mount Status: MOVEMENT_DETECTED | Deviation: 0.279 g"
+ *   "Mount Status: RECALIBRATION_REQUIRED | Deviation: 0.009 g"
+ *   "Mount Status: UNAVAILABLE"
+ */
+function parseMountStatusLine(trimmed) {
+  const statusMatch = trimmed.match(/^mount\s+status\s*:\s*([a-zA-Z0-9_\- ]+?)(?:\s*\||$)/i);
+  if (!statusMatch) return null;
+
+  const mountStatus = normalizeMountStatusToken(statusMatch[1]);
+  if (!mountStatus) return null;
+
+  const devMatch = trimmed.match(/deviation\s*:\s*([+-]?\d+(?:\.\d+)?)\s*g?\b/i);
+  const deviationG = devMatch && Number.isFinite(Number(devMatch[1]))
+    ? Number(Number(devMatch[1]).toFixed(3))
+    : null;
+
+  return {
+    format: 'mount_status',
+    device: 'Arduino GIGA R1 WiFi',
+    sensorModel: 'ADXL345',
+    mountStatus,
+    deviationG,
+    receivedAtMs: Date.now(),
+    rawLine: trimmed
+  };
+}
+
+/**
+ * Parses Arduino-commanded local RGB LED + active buzzer alarm mode lines:
+ *   "Alarm Mode: NORMAL"
+ *   "Alarm Mode: WARNING"
+ *   "Alarm Mode: CRITICAL"
+ *   "Alarm Mode: SENSOR_FAULT"
+ *   "Alarm Mode: CALIBRATING"
+ */
+function parseAlarmModeLine(trimmed) {
+  const match = trimmed.match(/^alarm\s+mode\s*:\s*([a-zA-Z0-9_\- ]+)$/i);
+  if (!match) return null;
+
+  const alarmMode = normalizeAlarmModeToken(match[1]);
+  if (!alarmMode) return null;
+
+  return {
+    format: 'alarm_mode',
+    device: 'Arduino GIGA R1 WiFi',
+    alarmMode,
+    commandedOnly: true,
+    receivedAtMs: Date.now(),
+    rawLine: trimmed
+  };
+}
+
+/**
+ * Parses explicit Arduino calibration lifecycle lines printed on startup or after sending 'c':
+ *   "ADXL345 CALIBRATION COMPLETE"
+ *   "Calibration complete."
+ *   "CALIBRATION FAILED"
+ *   "Calibrated Baseline: 15.42 cm"
+ *   "Dry Baseline: 15.42 cm"
  *   "Recalibrating..."
  */
 function parseCalibrationMessageLine(trimmed) {
+  // Ignore regular telemetry lines that carry Water Depth, Mount Status, or Alarm Mode
+  if (/water\s*depth\s*:|^mount\s+status\s*:|^alarm\s+mode\s*:/i.test(trimmed)) return null;
+
+  // 1. Explicit calibration failure
+  if (/\bcalibration\s+failed\b/i.test(trimmed)) {
+    return {
+      format: 'calibration',
+      device: 'Arduino GIGA R1 WiFi',
+      calibrationState: 'failed',
+      baselineCm: null,
+      receivedAtMs: Date.now(),
+      rawLine: trimmed
+    };
+  }
+
+  // 2. Explicit ADXL345 accelerometer calibration completion
+  if (/\badxl345\s+calibration\s+complete\b/i.test(trimmed)) {
+    return {
+      format: 'calibration',
+      device: 'Arduino GIGA R1 WiFi',
+      calibrationState: 'adxl_complete',
+      baselineCm: null,
+      receivedAtMs: Date.now(),
+      rawLine: trimmed
+    };
+  }
+
   const hasCalibKeyword = /\b(calibrat\w*|baseline|dry[\s-]*road|zero[\s-]*point)\b/i.test(trimmed);
   if (!hasCalibKeyword) return null;
 
-  // Ignore regular telemetry lines that happen to include pipe-delimited Water Depth
-  if (/water\s*depth\s*:/i.test(trimmed)) return null;
-
-  const valMatch = trimmed.match(/([+-]?\d+(?:\.\d+)?)\s*cm\b/i) ||
-    trimmed.match(/(?:baseline|calibrated|dry[\s-]*road)\s*(?:height|distance)?\s*(?:is|set\s*to|=|:)\s*([+-]?\d+(?:\.\d+)?)/i);
+  const valMatch =
+    trimmed.match(/([+-]?\d+(?:\.\d+)?)\s*cm\b/i) ||
+    trimmed.match(
+      /(?:baseline|calibrated|dry[\s-]*road)\s*(?:height|distance)?\s*(?:is|set\s*to|=|:)\s*([+-]?\d+(?:\.\d+)?)/i
+    );
   const baselineCm = valMatch ? Number(valMatch[1]) : null;
-  const isStarting = /\b(recalibrat\w*|calibrating|starting\s+calibration)\b/i.test(trimmed) && !Number.isFinite(baselineCm);
 
+  // 3. Explicit calibration complete (with or without numeric baseline cm)
+  if (/\bcalibration\s+complete\b/i.test(trimmed)) {
+    return {
+      format: 'calibration',
+      device: 'Arduino GIGA R1 WiFi',
+      calibrationState: 'complete',
+      baselineCm:
+        Number.isFinite(baselineCm) && baselineCm >= 3.0 && baselineCm <= 400.0
+          ? Number(baselineCm.toFixed(2))
+          : null,
+      receivedAtMs: Date.now(),
+      rawLine: trimmed
+    };
+  }
+
+  // 4. Explicit numeric baseline report
   if (Number.isFinite(baselineCm) && baselineCm >= 3.0 && baselineCm <= 400.0) {
     return {
       format: 'calibration',
@@ -75,6 +234,8 @@ function parseCalibrationMessageLine(trimmed) {
     };
   }
 
+  // 5. Calibration starting / in progress
+  const isStarting = /\b(recalibrat\w*|calibrating|starting\s+calibration)\b/i.test(trimmed);
   if (isStarting) {
     return {
       format: 'calibration',
@@ -89,64 +250,23 @@ function parseCalibrationMessageLine(trimmed) {
   return null;
 }
 
-function normalizeFloatSwitchState(raw) {
-  if (!raw) return null;
-  const upper = String(raw).trim().toUpperCase();
-  if (upper === 'OPEN' || upper === 'DRY' || upper === '0' || upper === 'LOW') return 'OPEN';
-  if (upper === 'CLOSED' || upper === 'CLOSE' || upper === 'WET' || upper === 'TRIGGERED' || upper === '1' || upper === 'HIGH') {
-    return 'CLOSED';
-  }
-  return null;
-}
-
 /**
- * Parses standalone float-switch serial lines emitted by the Arduino GIGA R1 WiFi:
- *   "Float Switch: OPEN"
- *   "Float Switch: CLOSED"
- * Does NOT match lines that also carry ultrasonic Distance / Water Depth readings
- * (those are parsed by parseTextSerialLine with optional floatSwitchState attached).
- */
-function parseFloatSwitchLine(trimmed) {
-  if (/distance\s*:|(?:water\s*)?depth\s*:/i.test(trimmed)) {
-    return null;
-  }
-  const match = trimmed.match(/^(?:backup\s+)?float(?:\s+switch|\s+sensor)?\s*(?::|=)\s*(OPEN|CLOSED)\b/i);
-  if (!match) return null;
-
-  const state = normalizeFloatSwitchState(match[1]);
-  if (!state) return null;
-
-  return {
-    format: 'float_switch',
-    device: 'Arduino GIGA R1 WiFi',
-    sensorModel: 'Liyafy XSL-3508-P',
-    floatSwitchState: state,
-    receivedAtMs: Date.now(),
-    rawLine: trimmed
-  };
-}
-
-/**
- * Parses the pipe-delimited text line emitted by the tested Arduino GIGA R1 WiFi sketch:
- *   "Distance: 14.03 cm | Water Depth: 0.00 cm | Status: NORMAL"
- * Also preserves optional inline float-switch status if appended on the same line:
- *   "Distance: 14.03 cm | Water Depth: 0.00 cm | Status: NORMAL | Float Switch: OPEN"
+ * Parses the pipe-delimited ultrasonic telemetry line emitted by the Arduino GIGA R1 WiFi:
+ *   "Distance: 15.42 cm | Water Depth: 0.00 cm | Status: NORMAL"
  *
  * IMPORTANT CALIBRATION RELIABILITY RULE:
  *   - When Water Depth is 0.00 cm, the Arduino clamps negative differences (distance > baseline)
- *     to 0.00 cm. Therefore (distance + 0.00) does NOT equal the true dry baseline when
- *     ultrasonic noise bounces above the baseline (e.g. 15.78 cm + 0.00 != 14.05 cm).
- *   - We therefore compute `inferredBaselineCm = distance + depth` ONLY when depth > 0.02 cm
- *     (unclamped), and expose it separately from `distanceCm` so the dashboard NEVER overwrites
- *     a locked baseline from noisy clamped-zero readings or during active flooding.
+ *     to 0.00 cm. Therefore `inferredBaselineCm = distance + depth` is computed ONLY when
+ *     depth > 0.02 cm (unclamped), so noisy dry echoes never overwrite a locked baseline.
  */
 function parseTextSerialLine(trimmed) {
   const distMatch = trimmed.match(/distance\s*:\s*([+-]?\d+(?:\.\d+)?)\s*(?:cm)?/i);
   const depthMatch = trimmed.match(/(?:water\s*)?depth\s*:\s*([+-]?\d+(?:\.\d+)?)\s*(?:cm)?/i);
   const statusMatch = trimmed.match(/status\s*:\s*([a-zA-Z0-9_\- ]+)/i);
-  const floatMatch = trimmed.match(/float(?:\s+switch|\s+sensor)?\s*(?::|=)\s*(OPEN|CLOSED)\b/i);
 
-  const hasOutOfRangeWord = /\b(out\s*of\s*range|timeout|no\s*echo|invalid\s*reading)\b/i.test(trimmed);
+  const hasOutOfRangeWord = /\b(out\s*of\s*range|timeout|no\s*echo|invalid\s*reading|sensor\s*error)\b/i.test(
+    trimmed
+  );
 
   if (!distMatch && !depthMatch && !hasOutOfRangeWord) {
     return null;
@@ -155,16 +275,13 @@ function parseTextSerialLine(trimmed) {
   const distanceCm = distMatch ? Number(distMatch[1]) : null;
   const reportedDepthCm = depthMatch ? Number(depthMatch[1]) : null;
   const reportedStatus = statusMatch ? normalizeStatusToken(statusMatch[1].split('|')[0]) : null;
-  const floatSwitchState = floatMatch ? normalizeFloatSwitchState(floatMatch[1]) : null;
 
   const isExplicitError =
     hasOutOfRangeWord ||
     reportedStatus === 'OUT_OF_RANGE' ||
+    reportedStatus === 'SENSOR_FAULT' ||
     (distMatch && !Number.isFinite(distanceCm));
 
-  // Only infer the Arduino's internal baseline when depth is strictly positive (unclamped).
-  // Clamped zero readings (e.g. Distance: 15.78 cm | Water Depth: 0.00 cm) are NOT valid
-  // baseline measurements because ultrasonic scatter above the dry floor clamps to 0.00 cm.
   let inferredBaselineCm = null;
   if (
     !isExplicitError &&
@@ -179,27 +296,28 @@ function parseTextSerialLine(trimmed) {
   let errorCode = null;
   let firmwareQuality = null;
   if (isExplicitError) {
-    errorCode = /timeout|no\s*echo/i.test(trimmed) ? 'ultrasonic_timeout' : 'out_of_range';
+    errorCode = /sensor\s*error/i.test(trimmed) || reportedStatus === 'SENSOR_FAULT'
+      ? 'sensor_error'
+      : /timeout|no\s*echo/i.test(trimmed)
+      ? 'ultrasonic_timeout'
+      : 'out_of_range';
     firmwareQuality = 'out_of_range';
   }
 
   return {
     format: 'text',
     device: 'Arduino GIGA R1 WiFi',
-    distanceCm: Number.isFinite(distanceCm) ? Number(distanceCm.toFixed(2)) : null,
-    // Keep mountHeightCm populated only when mathematically unclamped (or null when clamped at 0)
+    distanceCm: !isExplicitError && Number.isFinite(distanceCm) ? Number(distanceCm.toFixed(2)) : null,
     mountHeightCm: inferredBaselineCm,
     inferredBaselineCm,
     reportedDepthCm:
       !isExplicitError && Number.isFinite(reportedDepthCm) ? Number(reportedDepthCm.toFixed(2)) : null,
-    reportedStatus: reportedStatus && reportedStatus !== 'OUT_OF_RANGE' ? reportedStatus : null,
+    reportedStatus:
+      reportedStatus && reportedStatus !== 'OUT_OF_RANGE' ? reportedStatus : null,
     errorCode,
     firmwareQuality,
     burstSpreadCm: null,
     validPings: null,
-    floatLow: null,
-    floatHigh: null,
-    floatSwitchState,
     barrierState: 'not_installed',
     uptimeMs: null,
     receivedAtMs: Date.now(),
@@ -208,10 +326,8 @@ function parseTextSerialLine(trimmed) {
 }
 
 /**
- * Safely parses a single newline-delimited serial line (JSON, calibration message,
- * standalone float-switch line, or ultrasonic text format).
- * Preserves explicit error/out-of-range frames so the dashboard flags Out of Range
- * instead of silently dropping them or interpreting them as 0.00 cm water depth.
+ * Safely parses a single newline-delimited serial line (JSON, SENSOR ERROR,
+ * Mount Status, Alarm Mode, calibration lifecycle message, or ultrasonic text line).
  */
 export function parseArduinoSerialLine(rawLine) {
   const trimmed = String(rawLine || '').trim();
@@ -241,41 +357,35 @@ export function parseArduinoSerialLine(rawLine) {
       const validPings = obj.valid_pings != null ? Number(obj.valid_pings) : null;
       const firmwareQuality = obj.quality ? String(obj.quality).toLowerCase() : null;
       const reportedStatus = normalizeStatusToken(obj.status || obj.flood_status);
-      const floatSwitchState = normalizeFloatSwitchState(obj.float_switch ?? obj.float_state);
+      const mountStatus = normalizeMountStatusToken(obj.mount_status);
+      const deviationG =
+        obj.deviation_g != null && Number.isFinite(Number(obj.deviation_g))
+          ? Number(Number(obj.deviation_g).toFixed(3))
+          : null;
+      const alarmMode = normalizeAlarmModeToken(obj.alarm_mode);
 
       const hasValidMeasurement = Number.isFinite(distanceCm) || Number.isFinite(waterDepthCm);
       const hasExplicitError = Boolean(errorCode) || firmwareQuality === 'out_of_range';
 
-      if (!hasValidMeasurement && !hasExplicitError && !floatSwitchState) {
+      if (!hasValidMeasurement && !hasExplicitError) {
         return null;
-      }
-
-      if (!hasValidMeasurement && !hasExplicitError && floatSwitchState) {
-        return {
-          format: 'float_switch',
-          device: String(obj.device || 'Arduino GIGA R1 WiFi'),
-          sensorModel: 'Liyafy XSL-3508-P',
-          floatSwitchState,
-          receivedAtMs: Date.now(),
-          rawLine: trimmed
-        };
       }
 
       return {
         format: 'json',
         device: String(obj.device || 'Arduino GIGA R1 WiFi'),
-        distanceCm: Number.isFinite(distanceCm) ? distanceCm : null,
+        distanceCm: !hasExplicitError && Number.isFinite(distanceCm) ? distanceCm : null,
         mountHeightCm: Number.isFinite(mountHeightCm) ? mountHeightCm : null,
         inferredBaselineCm: Number.isFinite(mountHeightCm) ? mountHeightCm : null,
-        reportedDepthCm: Number.isFinite(waterDepthCm) ? waterDepthCm : null,
+        reportedDepthCm: !hasExplicitError && Number.isFinite(waterDepthCm) ? waterDepthCm : null,
         reportedStatus: reportedStatus && reportedStatus !== 'OUT_OF_RANGE' ? reportedStatus : null,
+        mountStatus,
+        deviationG,
+        alarmMode,
         errorCode,
         firmwareQuality,
         burstSpreadCm: Number.isFinite(burstSpreadCm) ? burstSpreadCm : null,
         validPings: Number.isFinite(validPings) ? validPings : null,
-        floatLow: typeof obj.float_low === 'boolean' ? obj.float_low : null,
-        floatHigh: typeof obj.float_high === 'boolean' ? obj.float_high : null,
-        floatSwitchState,
         barrierState: obj.barrier_state ? String(obj.barrier_state) : 'not_installed',
         uptimeMs:
           obj.uptime_ms != null && Number.isFinite(Number(obj.uptime_ms))
@@ -289,16 +399,64 @@ export function parseArduinoSerialLine(rawLine) {
     }
   }
 
-  // 2. Standalone float-switch line ("Float Switch: OPEN" / "Float Switch: CLOSED")
-  const floatMsg = parseFloatSwitchLine(trimmed);
-  if (floatMsg) return floatMsg;
+  // 2. Standalone SENSOR ERROR line
+  const sensorErrMsg = parseSensorErrorLine(trimmed);
+  if (sensorErrMsg) return sensorErrMsg;
 
-  // 3. Explicit Arduino calibration message (on boot or after 'c' command)
+  // 3. ADXL345 Mount Status line
+  const mountMsg = parseMountStatusLine(trimmed);
+  if (mountMsg) return mountMsg;
+
+  // 4. Local Alarm Mode line
+  const alarmMsg = parseAlarmModeLine(trimmed);
+  if (alarmMsg) return alarmMsg;
+
+  // 5. Explicit Arduino calibration lifecycle message
   const calibMsg = parseCalibrationMessageLine(trimmed);
   if (calibMsg) return calibMsg;
 
-  // 4. Pipe-delimited ultrasonic text format ("Distance: 14.03 cm | Water Depth: 0.00 cm | Status: NORMAL")
+  // 6. Pipe-delimited ultrasonic text format
   return parseTextSerialLine(trimmed);
+}
+
+/**
+ * Stateful USB serial chunk reassembler that safely handles arbitrary split
+ * chunks (mid-line splits, CR/LF boundaries, multi-line bursts) and emits
+ * parsed packets in exact arrival order.
+ */
+export function createSerialStreamParser(onParsed) {
+  let lineBuffer = '';
+
+  return {
+    pushChunk(chunk) {
+      const parsedItems = [];
+      if (!chunk) return parsedItems;
+      lineBuffer += String(chunk);
+      // Guard against runaway memory if corrupted binary stream never sends newlines
+      if (lineBuffer.length > 16384) {
+        lineBuffer = lineBuffer.slice(-4096);
+      }
+      const lines = lineBuffer.split(/\r?\n/);
+      lineBuffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const parsed = parseArduinoSerialLine(line);
+        if (parsed) {
+          parsedItems.push(parsed);
+          if (typeof onParsed === 'function') {
+            onParsed(parsed);
+          }
+        }
+      }
+      return parsedItems;
+    },
+    reset() {
+      lineBuffer = '';
+    },
+    getPendingBuffer() {
+      return lineBuffer;
+    }
+  };
 }
 
 export class ArduinoSerialClient {
@@ -313,7 +471,7 @@ export class ArduinoSerialClient {
     this.readableStreamClosed = null;
     this.connected = false;
     this.keepReading = false;
-    this.lineBuffer = '';
+    this.streamParser = createSerialStreamParser((packet) => this.onReading(packet));
     this._boundPortDisconnect = (ev) => {
       if (this.port && ev.target === this.port) {
         const msg = 'Arduino USB cable was disconnected — Connection Lost.';
@@ -347,7 +505,7 @@ export class ArduinoSerialClient {
       this.port = port;
       this.connected = true;
       this.keepReading = true;
-      this.lineBuffer = '';
+      this.streamParser.reset();
 
       if (typeof navigator.serial.addEventListener === 'function') {
         navigator.serial.addEventListener('disconnect', this._boundPortDisconnect);
@@ -395,7 +553,7 @@ export class ArduinoSerialClient {
   }
 
   /**
-   * Sends a single serial command (such as 'c' for dry-road recalibration) to the connected Arduino.
+   * Sends a single serial command (such as 'c' for dry-road & stationary-mount recalibration).
    */
   async sendCommand(command) {
     if (!this.connected || !this.port) {
@@ -438,19 +596,9 @@ export class ArduinoSerialClient {
         const { value, done } = await this.reader.read();
         if (done) break;
         if (value) {
-          this.lineBuffer += value;
-          const lines = this.lineBuffer.split(/\r?\n/);
-          this.lineBuffer = lines.pop() || '';
-
-          for (const line of lines) {
-            const parsed = parseArduinoSerialLine(line);
-            if (parsed) {
-              this.onReading(parsed);
-            }
-          }
+          this.streamParser.pushChunk(value);
         }
       }
-      // If stream ended cleanly while we still expected to read, treat as connection lost
       if (this.keepReading) {
         const msg = 'Arduino USB serial stream closed unexpectedly — Connection Lost.';
         this.onError(msg);
@@ -474,7 +622,11 @@ export class ArduinoSerialClient {
     const wasConnected = this.connected;
     this.connected = false;
 
-    if (typeof navigator !== 'undefined' && navigator.serial && typeof navigator.serial.removeEventListener === 'function') {
+    if (
+      typeof navigator !== 'undefined' &&
+      navigator.serial &&
+      typeof navigator.serial.removeEventListener === 'function'
+    ) {
       navigator.serial.removeEventListener('disconnect', this._boundPortDisconnect);
     }
 
@@ -492,7 +644,7 @@ export class ArduinoSerialClient {
       this.reader = null;
       this.readableStreamClosed = null;
       this.port = null;
-      this.lineBuffer = '';
+      this.streamParser.reset();
       if (wasConnected) {
         this.onStatusChange(
           'disconnected',

@@ -80,7 +80,7 @@
               Active Street Flood <span>Early Warning</span> &amp; Drainage Monitoring
             </h1>
             <p class="hero-desc">
-              NYC FloodGuard upgrades passive flood reporting into an active early-warning prototype. Paired with an Arduino GIGA R1 WiFi, HC-SR04 ultrasonic sensor, float switches, and a 3D-printed NYC street model, it tracks water depth in centimeters, measures how fast water is rising or draining, and estimates time until configurable danger thresholds.
+              NYC FloodGuard upgrades passive flood reporting into an active early-warning prototype. Paired with an Arduino GIGA R1 WiFi, HC-SR04 ultrasonic sensor, ADXL345 accelerometer, active buzzer, RGB LED, and a 3D-printed NYC street model, it monitors water depth in centimeters, tracks sensor-mount stability, commands local visual and audible alarms, and estimates time until configurable thresholds when measurements are valid.
             </p>
 
             <div class="feature-summary-list">
@@ -267,6 +267,14 @@
           <span id="presSourceMirror" class="status-tag tag-neutral">OFFLINE</span>
         </div>
         <div class="presentation-actions">
+          <button type="button" id="btnPresTestBuzzer" class="btn btn-sm btn-outline hidden" title="Send 'b' serial command to test active buzzer">
+            <i data-lucide="volume-2" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+            <span>Test Buzzer (b)</span>
+          </button>
+          <button type="button" id="btnPresRecalibrate" class="btn btn-sm btn-outline hidden" title="Confirm dry road and stationary mount to send 'c'">
+            <i data-lucide="rotate-ccw" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+            <span>Recalibrate (c)</span>
+          </button>
           <span id="presClockText" class="mono-text presentation-clock">--:--:--</span>
           <button type="button" id="btnExitPresentationMode" class="btn btn-sm btn-outline">
             <i data-lucide="minimize-2" class="ui-icon" aria-hidden="true"></i>
@@ -299,9 +307,13 @@
               <i data-lucide="usb" class="ui-icon" aria-hidden="true"></i>
               <span>Connect Arduino (USB)</span>
             </button>
-            <button type="button" id="btnOpenRecalibrate" class="btn btn-outline hidden" title="Send 'c' serial command to recalibrate dry-road baseline">
+            <button type="button" id="btnOpenRecalibrate" class="btn btn-outline hidden" title="Send 'c' serial command after confirming dry roadway and stationary mount">
               <i data-lucide="rotate-ccw" class="ui-icon" aria-hidden="true"></i>
               <span>Recalibrate (c)</span>
+            </button>
+            <button type="button" id="btnTestBuzzer" class="btn btn-outline hidden" title="Send 'b' serial command to test active buzzer">
+              <i data-lucide="volume-2" class="ui-icon" aria-hidden="true"></i>
+              <span>Test Buzzer (b)</span>
             </button>
             <button type="button" id="btnDisconnectArduino" class="btn btn-danger hidden">
               <i data-lucide="unplug" class="ui-icon" aria-hidden="true"></i>
@@ -322,17 +334,23 @@
         </div>
       </div>
 
-      <!-- Manual Dry-Road Recalibration Confirmation Strip (Sends 'c' over USB Serial) -->
-      <div id="recalibrateConfirmStrip" class="recalib-strip hidden" role="region" aria-label="Dry-Road Recalibration Confirmation">
+      <!-- Manual Dry-Road & Stationary-Mount Recalibration Confirmation Strip (Sends 'c' over USB Serial) -->
+      <div id="recalibrateConfirmStrip" class="recalib-strip hidden" role="region" aria-label="Dry-Road and Stationary-Mount Recalibration Confirmation">
         <div class="recalib-strip-main">
-          <strong>Confirm Dry Roadway Before Recalibrating</strong>
+          <strong>Confirm Dry Roadway &amp; Stationary Mount Before Recalibrating</strong>
           <p class="recalib-strip-desc">
-            Recalibration sends the <code>c</code> command to your Arduino GIGA R1 WiFi to measure a new dry-road baseline. Never recalibrate while water is pooling on the roadway.
+            Recalibration sends <code>c</code> over USB Serial to calibrate the ADXL345 mount reference and measure a fresh HC-SR04 dry-road baseline. Predictions pause and reset until calibration succeeds and fresh valid telemetry arrives.
           </p>
-          <label class="recalib-check-label">
-            <input type="checkbox" id="chkConfirmDryRoad" />
-            <span>I confirm the 3D-printed NYC roadway is completely dry, the drain is unobstructed, and Pump 2 is off.</span>
-          </label>
+          <div class="recalib-checks-stack">
+            <label class="recalib-check-label">
+              <input type="checkbox" id="chkConfirmDryRoad" />
+              <span>I confirm the 3D-printed NYC roadway is <strong>completely dry</strong>, the drain is unobstructed, and Pump 2 is off.</span>
+            </label>
+            <label class="recalib-check-label">
+              <input type="checkbox" id="chkConfirmStationaryMount" />
+              <span>I confirm the <strong>sensor mount / riser is completely stationary</strong> and untouched (ADXL345 steady).</span>
+            </label>
+          </div>
         </div>
         <div class="recalib-strip-actions">
           <button type="button" id="btnConfirmRecalibrate" class="btn btn-sm btn-cyan" disabled>Send &lsquo;c&rsquo; Recalibrate</button>
@@ -408,7 +426,7 @@
           </div>
           <div id="dashStatusValue" class="metric-status-text">UNAVAILABLE</div>
           <div id="dashStatusMeta" class="metric-subtext">
-            Normal &lt; <span id="dashWarnValLabel">0.50</span> cm &middot; Warn &ge; 0.50 cm &middot; Crit &ge; <span id="dashCritValLabel">1.25</span> cm
+            Normal &lt; <span id="dashWarnValLabel">0.25</span> cm &middot; Warn &ge; 0.25 cm &middot; Crit &ge; <span id="dashCritValLabel">0.60</span> cm
           </div>
         </article>
 
@@ -448,11 +466,11 @@
           </div>
           <div class="eta-pair">
             <div class="eta-row">
-              <span class="eta-key">Warning (<span id="dashEtaWarnThresh">0.50</span> cm)</span>
+              <span class="eta-key">Warning (<span id="dashEtaWarnThresh">0.25</span> cm)</span>
               <strong id="dashEtaWarnVal" class="eta-val">Insufficient Data</strong>
             </div>
             <div class="eta-row">
-              <span class="eta-key">Critical (<span id="dashEtaCritThresh">1.25</span> cm)</span>
+              <span class="eta-key">Critical (<span id="dashEtaCritThresh">0.60</span> cm)</span>
               <strong id="dashEtaCritVal" class="eta-val">Insufficient Data</strong>
             </div>
           </div>
@@ -486,88 +504,102 @@
         </div>
       </section>
 
-      <!-- Independent Backup Float Sensor Card (Liyafy XSL-3508-P — Separate from Ultrasonic Telemetry) -->
-      <section id="backupFloatPanel" class="surface-card float-sensor-panel dash-panel-gap" aria-labelledby="backupFloatHeading">
-        <div class="card-header-row" style="margin-bottom:12px;">
-          <div>
-            <div class="session-title-row">
-              <h2 id="backupFloatHeading" class="card-title">Backup Float Sensor</h2>
-              <span class="mono-subtext">Liyafy XSL-3508-P &middot; Secondary Contact Switch</span>
+      <!-- Live Sensor-Mount Stability (ADXL345) & Commanded Local Alarm Mode (RGB LED + Active Buzzer) -->
+      <div id="hardwareIntegrityRow" class="hw-integrity-grid dash-panel-gap">
+        <!-- Card 1: ADXL345 Sensor-Mount Stability & Calibration Protection -->
+        <section id="mountStabilityCard" class="surface-card hw-integrity-card" aria-labelledby="mountStabilityHeading" aria-live="polite">
+          <div class="card-header-row" style="margin-bottom:12px;">
+            <div class="card-title-with-icon">
+              <span id="mountIconBadge" class="card-icon-badge" aria-hidden="true">
+                <i data-lucide="compass" class="ui-icon"></i>
+              </span>
+              <div>
+                <h2 id="mountStabilityHeading" class="card-title">Sensor-Mount Stability</h2>
+                <p class="card-subtitle">ADXL345 3-axis accelerometer &middot; Calibration protection</p>
+              </div>
             </div>
-            <p class="card-subtitle">
-              Displayed independently from HC-SR04 ultrasonic depth. Passed electrical testing only &mdash; does <strong>not</strong> automatically trigger WARNING or CRITICAL flood alerts.
-            </p>
-          </div>
-          <span id="floatValidationBadge" class="status-tag tag-neutral">Electrical Test Only (Not Mounted)</span>
-        </div>
-
-        <div class="float-panel-grid">
-          <!-- Column 1: Live OPEN / CLOSED Electrical State -->
-          <div id="floatStateCard" class="float-state-box float-state-awaiting">
-            <div class="metric-label">Live Switch State</div>
-            <div id="floatSwitchStateVal" class="float-state-value">AWAITING DATA</div>
-            <div id="floatSwitchMetaLine" class="metric-subtext mono-text">
-              Waiting for <code>Float Switch: OPEN</code> or <code>Float Switch: CLOSED</code> over USB Serial
-            </div>
-            <div class="float-honest-note">
-              Independent sensor readout &mdash; never alters ultrasonic depth or triggers CRITICAL alerts.
-            </div>
+            <span id="mountStatusTag" class="status-tag tag-neutral">Awaiting USB</span>
           </div>
 
-          <!-- Column 2: Configurable Activation Height & Sensor Agreement Indicator -->
-          <div class="float-agreement-box">
-            <div class="float-agreement-head">
-              <span class="metric-label">Ultrasonic &harr; Float Agreement</span>
-              <span id="floatAgreementTag" class="status-tag tag-neutral">Not Configured</span>
+          <div class="hw-integrity-readout-row">
+            <div>
+              <div class="metric-label">Mount Status</div>
+              <div id="mountStatusValue" class="hw-integrity-main-val">UNAVAILABLE</div>
             </div>
-            <p id="floatAgreementDetail" class="float-agreement-detail">
-              Configure the float switch&rsquo;s measured physical activation height (cm) after mounting to enable agreement checks with the HC-SR04 ultrasonic sensor.
-            </p>
-            <form id="floatActivationForm" class="float-config-row" novalidate>
-              <label for="floatActivationHeightInput" class="sr-only">Physical activation height in cm</label>
-              <input
-                type="number"
-                id="floatActivationHeightInput"
-                class="form-control mono-input float-height-input"
-                min="0.10"
-                max="50"
-                step="0.05"
-                placeholder="Height (cm)"
-              />
-              <label for="floatClosedPolaritySelect" class="sr-only">Switch polarity when closed</label>
-              <select id="floatClosedPolaritySelect" class="form-control float-polarity-select">
-                <option value="water">CLOSED = Water at/above height</option>
-                <option value="dry">CLOSED = Dry / below height</option>
-              </select>
-              <button type="submit" id="btnSaveFloatHeight" class="btn btn-sm btn-primary">Set Height</button>
-              <button type="button" id="btnClearFloatHeight" class="btn btn-sm btn-outline" disabled>Unset</button>
-            </form>
+            <div class="hw-deviation-block">
+              <div class="metric-label">Acceleration Deviation</div>
+              <div class="hw-deviation-val-row">
+                <strong id="mountDeviationVal" class="mono-val hw-deviation-num">--</strong>
+                <span class="hw-deviation-unit">g</span>
+              </div>
+            </div>
           </div>
 
-          <!-- Column 3: Timestamped Float-Switch State Change Log -->
-          <div class="float-log-box">
-            <div class="float-agreement-head" style="margin-bottom:6px;">
-              <span class="metric-label">State Change Log (<span id="floatTransitionCountVal">0</span> changes)</span>
-              <button type="button" id="btnClearFloatHistory" class="btn btn-sm btn-outline">Clear</button>
+          <p id="mountProtectionNote" class="hw-integrity-note">
+            Connect the Arduino GIGA R1 WiFi over USB Serial to stream live ADXL345 mount stability. Older firmware without mount lines remains supported.
+          </p>
+
+          <div class="hw-integrity-footer">
+            <span id="mountTimestampLine" class="mono-subtext">Last mount update: --</span>
+            <button type="button" id="btnMountQuickRecalibrate" class="btn btn-sm btn-cyan hidden">
+              <i data-lucide="rotate-ccw" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+              <span>Recalibrate (&lsquo;c&rsquo;)</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- Card 2: Commanded Local Alarm Mode (RGB LED + Active Buzzer) -->
+        <section id="localAlarmCard" class="surface-card hw-integrity-card" aria-labelledby="localAlarmHeading" aria-live="polite">
+          <div class="card-header-row" style="margin-bottom:12px;">
+            <div class="card-title-with-icon">
+              <span id="alarmIconBadge" class="card-icon-badge" aria-hidden="true">
+                <i data-lucide="bell-ring" class="ui-icon"></i>
+              </span>
+              <div>
+                <h2 id="localAlarmHeading" class="card-title">Local Alarm Mode</h2>
+                <p class="card-subtitle">Commanded RGB LED &amp; active buzzer state</p>
+              </div>
             </div>
-            <div id="floatHistoryEmpty" class="float-log-empty">
-              No float-switch messages received yet.
+            <span id="alarmModeTag" class="status-tag tag-neutral">Commanded &middot; Offline</span>
+          </div>
+
+          <div class="hw-integrity-readout-row">
+            <div>
+              <div class="metric-label">Commanded Firmware Mode</div>
+              <div id="alarmModeValue" class="hw-integrity-main-val">UNAVAILABLE</div>
             </div>
-            <div id="floatHistoryWrap" class="float-log-scroll hidden">
-              <table class="data-table compact-table">
-                <thead>
-                  <tr>
-                    <th>Time</th>
-                    <th>State Change</th>
-                    <th class="num-col">Ultrasonic</th>
-                  </tr>
-                </thead>
-                <tbody id="floatHistoryTableBody"></tbody>
-              </table>
+            <div class="alarm-outputs-stack">
+              <div class="alarm-output-line">
+                <span id="alarmLedSwatch" class="alarm-led-swatch led-off" aria-hidden="true"></span>
+                <span class="alarm-output-label">RGB LED:</span>
+                <strong id="alarmLedText">Not reported</strong>
+              </div>
+              <div class="alarm-output-line">
+                <i data-lucide="volume-2" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+                <span class="alarm-output-label">Buzzer:</span>
+                <strong id="alarmBuzzerText">Not reported</strong>
+              </div>
             </div>
           </div>
-        </div>
-      </section>
+
+          <div id="preservedCriticalNotice" class="preserved-critical-strip hidden" role="status">
+            <i data-lucide="alert-octagon" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+            <span id="preservedCriticalText">Previously confirmed CRITICAL flood alarm preserved during sensor fault.</span>
+          </div>
+
+          <p class="hw-honest-disclosure">
+            <strong>Commanded vs. Verified:</strong> Displays the alarm mode commanded by Arduino firmware over USB Serial. Physical RGB LED illumination and active buzzer audio are <strong>not independently verified</strong> by light or sound sensors &mdash; confirm visually and audibly on the model.
+          </p>
+
+          <div class="hw-integrity-footer">
+            <span id="alarmTimestampLine" class="mono-subtext">Last alarm update: --</span>
+            <button type="button" id="btnAlarmTestBuzzer" class="btn btn-sm btn-outline hidden" title="Send 'b' over USB Serial to command a local buzzer test">
+              <i data-lucide="volume-2" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+              <span>Test Buzzer (&lsquo;b&rsquo;)</span>
+            </button>
+          </div>
+        </section>
+      </div>
 
       <!-- Real-Time Water-Level History Line Chart -->
       <section class="surface-card chart-section" aria-labelledby="dashChartHeading">
@@ -649,13 +681,13 @@
         </div>
       </section>
 
-      <!-- 9-Step Live Presentation Walkthrough Guide (Works in LIVE Arduino Mode; SIMULATED Kept Separate) -->
+      <!-- Live Presentation Walkthrough Guide (Works in LIVE Arduino Mode; SIMULATED Kept Separate) -->
       <section id="liveDemoGuidePanel" class="surface-card dash-panel-gap" aria-labelledby="liveDemoGuideHeading">
         <details class="demo-walkthrough-details">
           <summary>
             <div>
-              <h2 id="liveDemoGuideHeading" class="card-title">9-Step Live Presentation Walkthrough</h2>
-              <p class="card-subtitle">Follow with real Arduino readings in <strong>LIVE MODE</strong> (click to expand/collapse; steps auto-highlight as live states occur, or click any step to check it off).</p>
+              <h2 id="liveDemoGuideHeading" class="card-title">Live Presentation Walkthrough (4-Component Prototype)</h2>
+              <p class="card-subtitle">Follow with real Arduino readings in <strong>LIVE MODE</strong> (click to expand/collapse; steps auto-highlight as live states occur, or click any step to check off).</p>
             </div>
             <div class="filter-group">
               <span id="walkthroughModeBadge" class="status-tag tag-neutral">Awaiting LIVE Arduino</span>
@@ -664,18 +696,18 @@
           </summary>
 
           <div class="walkthrough-steps-grid" id="walkthroughStepsGrid" role="list">
-            <button type="button" class="walkthrough-step" data-step="1" role="listitem"><span class="walkthrough-step-num">1</span><span>Start with dry street and <strong>NORMAL</strong> status (&lt; 0.50 cm).</span></button>
-            <button type="button" class="walkthrough-step" data-step="2" role="listitem"><span class="walkthrough-step-num">2</span><span>Turn on <strong>Pump 2</strong> to simulate rainfall onto the roadway.</span></button>
-            <button type="button" class="walkthrough-step" data-step="3" role="listitem"><span class="walkthrough-step-num">3</span><span>Demonstrate an <strong>open storm drain</strong> draining water into the reservoir.</span></button>
-            <button type="button" class="walkthrough-step" data-step="4" role="listitem"><span class="walkthrough-step-num">4</span><span>Insert the removable blockage to <strong>block the storm drain</strong>.</span></button>
-            <button type="button" class="walkthrough-step" data-step="5" role="listitem"><span class="walkthrough-step-num">5</span><span>Show <strong>water rising</strong> on the live chart and trend indicator.</span></button>
-            <button type="button" class="walkthrough-step" data-step="6" role="listitem"><span class="walkthrough-step-num">6</span><span>Display live <strong>WARNING</strong> (&ge; 0.50 cm) and <strong>CRITICAL</strong> (&ge; 1.25 cm) alerts.</span></button>
-            <button type="button" class="walkthrough-step" data-step="7" role="listitem"><span class="walkthrough-step-num">7</span><span>Show <strong>trend-based ETA prediction</strong> when sufficient valid data exists.</span></button>
-            <button type="button" class="walkthrough-step" data-step="8" role="listitem"><span class="walkthrough-step-num">8</span><span>Highlight <strong>Actionable Flood Safety Recommendations</strong> &amp; Risk Intelligence.</span></button>
-            <button type="button" class="walkthrough-step" data-step="9" role="listitem"><span class="walkthrough-step-num">9</span><span><strong>Reopen the drain</strong> to show water receding (Falling Water &rarr; Recovery).</span></button>
+            <button type="button" class="walkthrough-step" data-step="1" role="listitem"><span class="walkthrough-step-num">1</span><span>Start dry: verify <strong>NORMAL</strong> (&lt; 0.25 cm), ADXL345 <strong>STABLE</strong> mount, and commanded <strong>Green LED / silent buzzer</strong>.</span></button>
+            <button type="button" class="walkthrough-step" data-step="2" role="listitem"><span class="walkthrough-step-num">2</span><span>Click <strong>Test Buzzer (&lsquo;b&rsquo;)</strong> to verify local audio on the prototype, then turn on the <strong>recirculating pump</strong> with the storm drain open.</span></button>
+            <button type="button" class="walkthrough-step" data-step="3" role="listitem"><span class="walkthrough-step-num">3</span><span>Insert the removable blockage to <strong>block the storm drain</strong> and show <strong>Rising Water</strong> on the live chart.</span></button>
+            <button type="button" class="walkthrough-step" data-step="4" role="listitem"><span class="walkthrough-step-num">4</span><span>Show <strong>WARNING</strong> (0.25 to &lt; 0.60 cm, Yellow LED / intermittent buzzer) and trend-based <strong>ETA</strong> when valid data is sufficient.</span></button>
+            <button type="button" class="walkthrough-step" data-step="5" role="listitem"><span class="walkthrough-step-num">5</span><span>Show <strong>CRITICAL</strong> (&ge; 0.60 cm, Red LED / continuous buzzer), Actionable Safety Guidance, and Risk Intelligence.</span></button>
+            <button type="button" class="walkthrough-step" data-step="6" role="listitem"><span class="walkthrough-step-num">6</span><span>Demonstrate <strong>mount bump or sensor fault</strong>: ADXL345 flags movement/recalibration or <code>SENSOR_FAULT</code> (Flashing Blue LED / fault alarm), suspends predictions, and preserves any confirmed CRITICAL alarm.</span></button>
+            <button type="button" class="walkthrough-step" data-step="7" role="listitem"><span class="walkthrough-step-num">7</span><span><strong>Reopen the drain</strong> and turn off the recirculating pump to demonstrate water receding and drainage recovery.</span></button>
+            <button type="button" class="walkthrough-step" data-step="8" role="listitem"><span class="walkthrough-step-num">8</span><span>Once completely dry and stationary, confirm both checkboxes and run <strong>Recalibrate (&lsquo;c&rsquo;)</strong> &rarr; verify window resets and resumes only on fresh valid telemetry.</span></button>
+            <button type="button" class="walkthrough-step" data-step="9" role="listitem"><span class="walkthrough-step-num">9</span><span>Ask the <strong>AI FloodGuard Assistant</strong> about live flood readings, sensor reliability, alarm mode, and NYC weather.</span></button>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;">
-            <span class="mono-subtext">LIVE Arduino telemetry is never mixed with SIMULATED Demo Mode data.</span>
+            <span class="mono-subtext">LIVE Arduino telemetry is never mixed with SIMULATED Demo Mode data. Educational prototype only &mdash; not an official warning system.</span>
             <button type="button" id="btnResetWalkthrough" class="btn btn-sm btn-outline">Reset Steps</button>
           </div>
         </details>
@@ -1015,7 +1047,7 @@
             </div>
             <div class="spec-row">
               <span class="spec-label">Locked Calibrated Baseline</span>
-              <strong id="hwMountHeightVal" class="mono-val">14.39 cm (default)</strong>
+              <strong id="hwMountHeightVal" class="mono-val">7.88 cm (default)</strong>
             </div>
             <div class="spec-row">
               <span class="spec-label">Current Sensor Distance</span>
@@ -1034,11 +1066,19 @@
               <span id="hwRawSerialLine" class="spec-note mono-text">--</span>
             </div>
             <div class="spec-row">
-              <span class="spec-label">Backup Float Sensor (XSL-3508-P)</span>
-              <strong id="hwFloatStatusVal" class="mono-val">Not connected</strong>
+              <span class="spec-label">ADXL345 Mount Stability</span>
+              <strong id="hwMountStabilityVal" class="mono-val">Not connected</strong>
             </div>
             <div class="spec-row">
-              <span class="spec-label">5V Water Pumps (Flood &amp; Drain)</span>
+              <span class="spec-label">Commanded Local Alarm Mode</span>
+              <strong id="hwAlarmModeVal" class="mono-val">Not connected</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Confirmed Critical Latch</span>
+              <strong id="hwCriticalLatchVal" class="mono-val">Inactive</strong>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">5V Water Pump (Rainfall Rig)</span>
               <span class="spec-note">Manual / physical test rig (pump state not telemetered)</span>
             </div>
             <div class="spec-row">
@@ -1053,7 +1093,7 @@
           <div class="card-header-row" style="margin-bottom:8px;">
             <div>
               <h2 id="settingsConfigHeading" class="card-title">Prototype Thresholds &amp; Calibration</h2>
-              <p class="card-subtitle">Calibrated for the tested 3D-printed NYC street prototype (Normal &lt; 0.50 cm, Warn 0.50&ndash;1.24 cm, Crit &ge; 1.25 cm).</p>
+              <p class="card-subtitle">Synchronized for the 3D-printed miniature NYC street prototype (Normal &lt; 0.25 cm, Warn 0.25 to &lt; 0.60 cm, Crit &ge; 0.60 cm).</p>
             </div>
             <span id="settingsRoleTag" class="status-tag tag-neutral">Read-Only</span>
           </div>
@@ -1064,36 +1104,36 @@
             <div class="form-row-2">
               <div class="form-group">
                 <label for="cfgMountHeightCm" class="form-label">Dry-Road Baseline Height (cm)</label>
-                <input type="number" id="cfgMountHeightCm" class="form-control mono-input" min="4" max="400" step="0.01" value="14.39" required />
+                <input type="number" id="cfgMountHeightCm" class="form-control mono-input" min="4" max="400" step="0.01" value="7.88" required />
               </div>
               <div class="form-group">
                 <label for="cfgMinRiseRate" class="form-label">Min Reliable Rise (cm/min)</label>
-                <input type="number" id="cfgMinRiseRate" class="form-control mono-input" min="0.05" max="10" step="0.01" value="0.12" required />
+                <input type="number" id="cfgMinRiseRate" class="form-control mono-input" min="0.02" max="10" step="0.01" value="0.08" required />
               </div>
             </div>
 
             <div class="form-row-2">
               <div class="form-group">
                 <label for="cfgWarnThresholdCm" class="form-label" style="color:var(--warn-700);">Warning Threshold (cm)</label>
-                <input type="number" id="cfgWarnThresholdCm" class="form-control mono-input" min="0.10" max="200" step="0.05" value="0.50" required />
+                <input type="number" id="cfgWarnThresholdCm" class="form-control mono-input" min="0.05" max="200" step="0.05" value="0.25" required />
               </div>
               <div class="form-group">
                 <label for="cfgCritThresholdCm" class="form-label" style="color:var(--crit-700);">Critical Threshold (cm)</label>
-                <input type="number" id="cfgCritThresholdCm" class="form-control mono-input" min="0.20" max="250" step="0.05" value="1.25" required />
+                <input type="number" id="cfgCritThresholdCm" class="form-control mono-input" min="0.10" max="250" step="0.05" value="0.60" required />
               </div>
             </div>
 
             <div class="form-group">
               <label for="cfgBarrierThresholdCm" class="form-label">Optional Servo Barrier Trigger (cm) <span class="muted-inline">(future hardware)</span></label>
-              <input type="number" id="cfgBarrierThresholdCm" class="form-control mono-input" min="0.20" max="250" step="0.05" value="1.00" required />
+              <input type="number" id="cfgBarrierThresholdCm" class="form-control mono-input" min="0.10" max="250" step="0.05" value="0.50" required />
             </div>
 
             <div id="adminSaveControls" class="btn-row hidden">
               <button type="submit" id="btnSaveAdminSettings" class="btn btn-primary">Save Settings to Supabase</button>
-              <button type="button" id="btnPresetStreetModel" class="btn btn-outline">Experimental Defaults (0.50 / 1.25 cm)</button>
+              <button type="button" id="btnPresetStreetModel" class="btn btn-outline">Prototype Defaults (0.25 / 0.60 cm)</button>
             </div>
             <p id="regularUserSettingsNote" class="form-footnote" style="margin-top:8px;">
-              Only database-verified Administrators can save threshold changes to Supabase (enforced by Row Level Security). Experimental street-model thresholds (WARNING &ge; 0.50 cm, CRITICAL &ge; 1.25 cm) are preserved and never auto-switched to deep-basin thresholds.
+              Only database-verified Administrators can save threshold changes to Supabase (enforced by Row Level Security). Miniature street-model thresholds (WARNING &ge; 0.25 cm, CRITICAL &ge; 0.60 cm) are synchronized across the dashboard, charts, alerts, and predictions.
             </p>
           </form>
         </section>
@@ -1441,17 +1481,17 @@
 
           <article class="hw-item">
             <h3>Three-Reading Alert Confirmation</h3>
-            <p>To prevent a momentary ripple or passing wave crest from triggering a false alarm, the firmware requires <strong>3 consecutive confirmed readings</strong> above the WARNING (<code>0.50 cm</code>) or CRITICAL (<code>1.25 cm</code>) threshold before escalating the official alert state.</p>
+            <p>To prevent a momentary ripple or passing wave crest from triggering a false alarm, the firmware requires <strong>3 consecutive confirmed readings</strong> above the WARNING (<code>0.25 cm</code>) or CRITICAL (<code>0.60 cm</code>) threshold before escalating the official alert state.</p>
           </article>
 
           <article class="hw-item">
             <h3>Locked Dry-Road Calibration</h3>
-            <p>Depth is computed from a calibrated dry street reference (<code>Depth = Dry Baseline &minus; Distance</code>). The dashboard locks that dry-road baseline so rising water never silently shifts zero; recalibration (serial command <code>c</code>) requires explicit user confirmation that the street is dry.</p>
+            <p>Depth is computed from a calibrated dry street reference (<code>Depth = Dry Baseline &minus; Distance</code>). The dashboard locks that dry-road baseline so rising water never silently shifts zero; recalibration (serial command <code>c</code>) requires explicit user confirmation that the roadway is dry and the mount is stationary.</p>
           </article>
 
           <article class="hw-item">
-            <h3>Sensor Mounting &amp; Vibration</h3>
-            <p>Because even a 3&ndash;5 mm shift in riser height directly biases water depth, the ultrasonic mount must be rigidly secured to the street basin. Mechanical shaking introduces distance jitter that degrades trend confidence and triggers <em>Unstable</em> sensor quality warnings.</p>
+            <h3>ADXL345 Mount Stability &amp; Vibration Guard</h3>
+            <p>Because even a small shift in riser height directly biases water depth, a mounted <strong>ADXL345 3-axis accelerometer</strong> tracks acceleration deviation (<code>g</code>). When movement occurs (<code>MOVEMENT_DETECTED</code>) or a mount shift invalidates zero (<code>RECALIBRATION_REQUIRED</code>), the dashboard marks measurements invalid, pauses predictions, and requires confirmed dry-road and stationary recalibration (<code>c</code>).</p>
           </article>
 
           <article class="hw-item">
@@ -1482,10 +1522,10 @@
           <article class="layer-card">
             <div class="layer-badge-row">
               <span class="layer-step">LAYER 1</span>
-              <span class="status-tag tag-normal">Physically Tested</span>
+              <span class="status-tag tag-normal">Mounted Hardware</span>
             </div>
             <h3>Detecting Current Flooding</h3>
-            <p>Measures standing water depth on the 3D-printed street model via Arduino GIGA R1 WiFi + HC-SR04 and confirms <strong>NORMAL</strong> (&lt;0.50 cm), <strong>WARNING</strong> (0.50&ndash;1.24 cm), or <strong>CRITICAL</strong> (&ge;1.25 cm) status using 7-sample median filtering and 3-reading confirmation. Verified physically up to 2.42 cm CRITICAL.</p>
+            <p>Measures standing water depth on the 3D-printed street model via Arduino GIGA R1 WiFi + HC-SR04 and confirms <strong>NORMAL</strong> (&lt;0.25 cm), <strong>WARNING</strong> (0.25 to &lt;0.60 cm), or <strong>CRITICAL</strong> (&ge;0.60 cm) status using 7-sample median filtering and 3-reading confirmation, guarded by ADXL345 mount stability checks.</p>
           </article>
 
           <article class="layer-card">
@@ -1494,7 +1534,7 @@
               <span class="status-tag tag-warn">Software-Tested / Experimental</span>
             </div>
             <h3>Detecting Rapidly Rising Water</h3>
-            <p>Evaluates rate of change (<code>cm/min</code>) over a rolling time window using linear regression and statistical quality gating. Reports <strong>Rising Water</strong>, rapid-rise alerts, or suspected blocked drainage only when measurements are consistent; reports <strong>Uncertain</strong> when noisy.</p>
+            <p>Evaluates rate of change (<code>cm/min</code>) over a rolling time window using linear regression and statistical quality gating. Reports <strong>Rising Water</strong>, rapid-rise alerts, or suspected blocked drainage only when measurements are valid and consistent; suspends predictions on faults or noisy echoes.</p>
           </article>
 
           <article class="layer-card">
@@ -1552,12 +1592,12 @@
 
           <details class="qa-item" open>
             <summary><span class="qa-num">Q6</span><span>What happens if the water shakes or splashes?</span></summary>
-            <p class="qa-answer">Splashes and surface waves scatter ultrasonic echoes and introduce noisy spikes or dropouts. We reduce false alarms using 7-sample median filtering, 3-reading alert confirmation, locked dry calibration, and statistical trend gating (marking noisy trends as <em>Uncertain</em> or flagging suspicious spikes) &mdash; while honestly recognizing that severe continuous turbulence still degrades accuracy.</p>
+            <p class="qa-answer">Splashes and surface waves scatter ultrasonic echoes and introduce noisy spikes or dropouts. We reduce false alarms using 7-sample median filtering, 3-reading alert confirmation, locked dry calibration, ADXL345 mount-stability monitoring, and statistical trend gating (marking noisy trends as <em>Uncertain</em> or flagging suspicious spikes) &mdash; while honestly recognizing that severe continuous turbulence still degrades accuracy.</p>
           </details>
 
           <details class="qa-item" open>
             <summary><span class="qa-num">Q7</span><span>How accurate is the system?</span></summary>
-            <p class="qa-answer">It is an educational tabletop prototype, not a certified hydrologic gauge. On a rigidly mounted, dry-calibrated model with calm water it reliably separates dry road from WARNING (&ge;0.50 cm) and CRITICAL (&ge;1.25 cm) pooling, but true error bounds (&plusmn;mm under ripples and vibration) must be measured against an independent ruler or calibrated reference across repeated trials.</p>
+            <p class="qa-answer">It is an educational tabletop prototype, not a certified hydrologic gauge. On a rigidly mounted, dry-calibrated model with calm water it separates dry road from WARNING (0.25 to &lt;0.60 cm) and CRITICAL (&ge;0.60 cm) pooling, but true error bounds (&plusmn;mm under ripples and vibration) must be measured against an independent ruler or calibrated reference across repeated trials.</p>
           </details>
 
           <details class="qa-item" open>
@@ -1597,7 +1637,7 @@
 
           <article class="hw-item">
             <h3>Additional Backup Sensors</h3>
-            <p>Pair ultrasonic sensors with industrial waterproof transducers, contact float switches, or submerged pressure sensors so two independent physical measurements must agree before triggering critical actions.</p>
+            <p>Pair ultrasonic sensors with industrial waterproof transducers, submerged hydrostatic pressure sensors, or redundant multi-sensor arrays so two independent physical measurements must agree before triggering critical actions.</p>
           </article>
 
           <article class="hw-item">
@@ -1623,34 +1663,105 @@
       </section>
 
       <!-- ================================================================
-           7. PHYSICAL PROTOTYPE HARDWARE, WIRING & VERIFICATION MATRIX
+           7. PHYSICAL PROTOTYPE HARDWARE ARCHITECTURE & VERIFICATION MATRIX
            ================================================================ -->
       <section id="sec-hardware-overview" class="surface-card research-section">
-        <h2 class="card-title" style="margin-bottom:12px;">7. Physical Prototype Hardware Components</h2>
-        <div class="hardware-grid">
-          <div class="hw-item">
-            <h3>Arduino GIGA R1 WiFi</h3>
-            <p>Dual-core STM32H747XI microcontroller (3.3V GPIO logic) running 7-sample median filtering, 3-reading alert confirmation, and USB Serial streaming at 115200 baud.</p>
+        <div class="card-header-row" style="margin-bottom:14px;">
+          <div>
+            <h2 class="card-title">7. Final Hardware Architecture &amp; Mounted Components</h2>
+            <p class="card-subtitle">End-to-end physical sensing, local alarm hardware, 115200-baud USB Web Serial protocol, and web intelligence pipeline.</p>
           </div>
+          <span class="status-tag tag-normal">0.25 / 0.60 cm Thresholds</span>
+        </div>
+
+        <!-- Visual Hardware Architecture Diagram -->
+        <div class="hw-arch-diagram" role="img" aria-label="NYC FloodGuard 2.0 Hardware Architecture Diagram showing miniature NYC roadway, HC-SR04 and ADXL345 sensors, Arduino GIGA R1 WiFi, RGB LED and active buzzer alarms, and 115200-baud Web Serial link to the web dashboard">
+          <div class="hw-arch-flow">
+            <div class="hw-arch-col">
+              <div class="hw-arch-stage-label">1. Physical Street Model</div>
+              <div class="hw-arch-node hw-arch-node-model">
+                <strong>3D-Printed NYC Roadway</strong>
+                <span>Removable storm-drain blockage &amp; catch-basin reservoir</span>
+              </div>
+              <div class="hw-arch-node hw-arch-node-model">
+                <strong>Recirculating Water Pump</strong>
+                <span>Simulates rainfall inflow across the miniature roadway</span>
+              </div>
+            </div>
+
+            <div class="hw-arch-arrow" aria-hidden="true">&rarr;</div>
+
+            <div class="hw-arch-col">
+              <div class="hw-arch-stage-label">2. Mounted Sensors</div>
+              <div class="hw-arch-node hw-arch-node-sensor">
+                <strong>HC-SR04 Ultrasonic Sensor</strong>
+                <span>Overhead distance &amp; water depth (3.3V divider on ECHO)</span>
+              </div>
+              <div class="hw-arch-node hw-arch-node-sensor">
+                <strong>ADXL345 Accelerometer</strong>
+                <span>3-axis mount stability &amp; deviation (<code>g</code>)</span>
+              </div>
+            </div>
+
+            <div class="hw-arch-arrow" aria-hidden="true">&rarr;</div>
+
+            <div class="hw-arch-col">
+              <div class="hw-arch-stage-label">3. Controller &amp; Local Alarms</div>
+              <div class="hw-arch-node hw-arch-node-mcu">
+                <strong>Arduino GIGA R1 WiFi</strong>
+                <span>3.3V STM32H747XI &middot; Authoritative status &amp; alarm control</span>
+                <div class="hw-arch-badges">
+                  <span>NORMAL &lt; 0.25 cm</span>
+                  <span>WARN 0.25&ndash;0.59 cm</span>
+                  <span>CRIT &ge; 0.60 cm</span>
+                </div>
+              </div>
+              <div class="hw-arch-node hw-arch-node-alarm">
+                <strong>RGB LED + Active Buzzer</strong>
+                <span>Green/Silent &middot; Yellow/Intermittent &middot; Red/Continuous &middot; Blue Flash/Fault</span>
+              </div>
+            </div>
+
+            <div class="hw-arch-arrow" aria-hidden="true">&harr;</div>
+
+            <div class="hw-arch-col">
+              <div class="hw-arch-stage-label">4. Web Serial &amp; Cloud Services</div>
+              <div class="hw-arch-node hw-arch-node-web">
+                <strong>NYC FloodGuard 2.0 Web App</strong>
+                <span>115200-baud USB Serial &middot; Commands: <code>c</code> (recalibrate), <code>b</code> (buzzer test)</span>
+              </div>
+              <div class="hw-arch-node hw-arch-node-cloud">
+                <strong>Live Context &amp; Storage</strong>
+                <span>Open-Meteo Weather &middot; NYC FloodNet &middot; Supabase &middot; Render Gemini API</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="hardware-grid" style="margin-top:16px;">
           <div class="hw-item">
             <h3>HC-SR04 Ultrasonic Sensor</h3>
-            <p>Mounted on a secured riser above the 3D-printed street surface to measure air distance to water continuously without contacting floodwater.</p>
+            <p>Mounted above the 3D-printed street surface to measure air distance down to water continuously without touching floodwater, reporting authoritative depth and status with 7-sample median filtering and 3-reading confirmation.</p>
           </div>
           <div class="hw-item">
-            <h3>3D-Printed NYC Street &amp; Storm Drain</h3>
-            <p>Scale NYC roadway, buildings, and catch-basin drain with a removable drain blockage to physically reproduce clogged-drain urban flooding.</p>
+            <h3>ADXL345 3-Axis Accelerometer</h3>
+            <p>Mounted on the sensor assembly to monitor acceleration deviation (<code>g</code>) in real time, reporting <code>STABLE</code>, <code>MOVEMENT_DETECTED</code>, <code>RECALIBRATION_REQUIRED</code>, or <code>UNAVAILABLE</code> to protect baseline calibration.</p>
           </div>
           <div class="hw-item">
-            <h3>Two 5V Water Pumps (Manual Control)</h3>
-            <p>Circulation and drainage pumps used during physical demonstrations to produce rising water when the drain is blocked and receding water when cleared.</p>
+            <h3>Active Buzzer (Local Audio Alarm)</h3>
+            <p>Mounted local audible indicator commanded by Arduino firmware: silent in <code>NORMAL</code>/<code>CALIBRATING</code>, intermittent in <code>WARNING</code>, continuous in <code>CRITICAL</code>, and fault alarm in <code>SENSOR_FAULT</code> (unless a previously confirmed critical alarm remains active). Supports manual <code>b</code> test command.</p>
           </div>
           <div class="hw-item">
-            <h3>Arduino GIGA Display Shield</h3>
-            <p>Touchscreen display firmware support for local on-model readout of water depth, alert status, trend, and sensor quality alongside the web dashboard.</p>
+            <h3>RGB LED (Local Visual Alarm)</h3>
+            <p>Mounted visual status beacon commanded by Arduino firmware: Green (<code>NORMAL</code> &lt; 0.25 cm), Yellow (<code>WARNING</code> 0.25 to &lt; 0.60 cm), Red (<code>CRITICAL</code> &ge; 0.60 cm), Flashing Blue (<code>SENSOR_FAULT</code>), and Blue (<code>CALIBRATING</code>). Dashboard shows commanded mode; physical light/sound is not sensor-verified.</p>
           </div>
           <div class="hw-item">
-            <h3>Float Switches &amp; Optional Barrier</h3>
-            <p>Firmware pins reserved for Low/High contact float switches (<code>D6</code>/<code>D7</code>) and optional future servo barrier (<code>D5</code>, disabled by default).</p>
+            <h3>Arduino GIGA R1 WiFi</h3>
+            <p>Dual-core STM32H747XI microcontroller (3.3V GPIO logic) coordinating ultrasonic sampling, ADXL345 mount checks, local RGB LED/buzzer alarm modes, <code>c</code> recalibration, <code>b</code> buzzer testing, and 115200-baud USB Serial streaming.</p>
+          </div>
+          <div class="hw-item">
+            <h3>3D-Printed NYC Street &amp; Recirculating Pump</h3>
+            <p>Miniature NYC roadway, catch-basin storm drain, removable drain blockage, water reservoir, and recirculating water pump to demonstrate clogged-drain flooding and drainage recovery live.</p>
           </div>
         </div>
       </section>
@@ -1658,59 +1769,71 @@
       <!-- Wiring Safety & Serial Formats -->
       <div class="about-grid-2" style="margin-bottom:20px;">
         <section class="surface-card">
-          <h2 class="card-title" style="margin-bottom:8px;">3.3V GPIO Safety &amp; Sensor Calibration</h2>
+          <h2 class="card-title" style="margin-bottom:8px;">3.3V GPIO Safety &amp; Calibration Protection</h2>
           <div class="inline-notice notice-warn" style="margin-bottom:12px;">
-            <strong>Critical 3.3V Warning (Arduino GIGA R1 WiFi):</strong> GIGA R1 GPIO pins are <strong>3.3V only</strong> and are NOT 5V tolerant. Connect HC-SR04 <code>ECHO</code> through <strong>two 470&nbsp;&Omega; resistors in series (940&nbsp;&Omega;) toward <code>D10</code></strong> with <strong>one 1&nbsp;k&Omega; resistor from <code>D10</code> to <code>GND</code></strong> (steps 5V safely down to ~2.58V).
+            <strong>Critical 3.3V Warning (Arduino GIGA R1 WiFi):</strong> GIGA R1 GPIO pins are <strong>3.3V only</strong> and are NOT 5V tolerant. Connect HC-SR04 <code>ECHO</code> through a resistor voltage divider (e.g., <strong>470&nbsp;&Omega; + 470&nbsp;&Omega; in series toward <code>D10</code></strong> and <strong>1&nbsp;k&Omega; from <code>D10</code> to <code>GND</code></strong>) to keep echo voltage safely within 3.3V logic limits.
           </div>
           <ul class="clean-list">
-            <li><strong>Wiring:</strong> <code>VCC &rarr; 5V</code>, <code>GND &rarr; GND</code>, <code>TRIG &rarr; D9</code>, <code>ECHO &rarr; 470&Omega; + 470&Omega; &rarr; D10 &rarr; 1k&Omega; &rarr; GND</code>, Float switches &rarr; <code>D6 / D7</code> to <code>GND</code>.</li>
-            <li><strong>Dry-Road Calibration:</strong> Drain the street model completely dry before locking the dry baseline, or use the confirmed manual recalibration control (serial command <code>c</code>).</li>
-            <li><strong>Browser Requirement:</strong> Web Serial requires desktop Google Chrome or Microsoft Edge over HTTPS or localhost.</li>
+            <li><strong>Final Hardware:</strong> Arduino GIGA R1 WiFi + HC-SR04 ultrasonic sensor + ADXL345 accelerometer + active buzzer + RGB LED + recirculating water pump + 3D-printed miniature NYC roadway with removable drain blockage.</li>
+            <li><strong>Confirmed Recalibration (<code>c</code>) &amp; Buzzer Test (<code>b</code>):</strong> Recalibrating requires confirming both a <em>completely dry roadway</em> and a <em>stationary sensor mount</em>; the dashboard never recalibrates automatically during flooding. Sending <code>b</code> commands a live buzzer check over USB Serial.</li>
+            <li><strong>Fault &amp; Critical Alarm Safety:</strong> <code>SENSOR ERROR</code> or <code>Alarm Mode: SENSOR_FAULT</code> is never shown as <code>0.00 cm</code> or <code>NORMAL</code>; any previously confirmed <code>CRITICAL</code> flood alarm remains preserved during sensor faults.</li>
+            <li><strong>Browser Requirement:</strong> Web Serial requires desktop Google Chrome or Microsoft Edge over HTTPS or localhost (close Arduino IDE Serial Monitor before connecting).</li>
           </ul>
         </section>
 
         <section class="surface-card">
-          <h2 class="card-title" style="margin-bottom:8px;">Supported USB Serial Formats (115200 baud)</h2>
+          <h2 class="card-title" style="margin-bottom:8px;">Supported USB Serial Messages (115200 baud)</h2>
           <p class="card-subtitle" style="margin-bottom:10px;">
-            NYC FloodGuard 2.0 parses both the tested human-readable Arduino output and newline-delimited JSON:
+            NYC FloodGuard 2.0 treats Arduino-reported statuses as authoritative and parses this 115200-baud protocol (plus older ultrasonic-only firmware):
           </p>
-          <pre class="code-block">Distance: 14.39 cm | Water Depth: 0.00 cm | Status: NORMAL
-Distance: 13.36 cm | Water Depth: 1.03 cm | Status: WARNING
-Distance: 12.67 cm | Water Depth: 1.72 cm | Status: CRITICAL</pre>
-          <p class="card-subtitle" style="margin:10px 0 6px;">Or structured JSON (<code>arduino/nyc_floodguard_giga.ino</code>):</p>
-          <pre class="code-block">{"device":"GIGA-R1-WIFI","mount_height_cm":14.39,"distance_cm":13.36,"water_depth_cm":1.03,"quality":"good"}</pre>
+          <pre class="code-block">Distance: 7.23 cm | Water Depth: 0.65 cm | Status: CRITICAL
+Mount Status: STABLE | Deviation: 0.006 g
+Alarm Mode: CRITICAL
+
+# Fault, Mount Movement &amp; Calibration Messages:
+SENSOR ERROR
+Mount Status: MOVEMENT_DETECTED | Deviation: 0.279 g
+Mount Status: RECALIBRATION_REQUIRED | Deviation: 0.009 g
+Mount Status: UNAVAILABLE
+Alarm Mode: NORMAL | WARNING | CRITICAL | SENSOR_FAULT | CALIBRATING
+ADXL345 CALIBRATION COMPLETE
+Calibration complete.
+CALIBRATION FAILED
+
+# Outbound Web Serial Commands (Dashboard -&gt; Arduino):
+c   # Recalibrate dry baseline &amp; mount (dry + stationary confirmed)
+b   # Active buzzer self-test command</pre>
         </section>
       </div>
 
       <!-- Honest 3-Column Verification Status Matrix -->
       <section class="surface-card">
-        <h2 class="card-title" style="margin-bottom:12px;">Verification Summary: Physically Tested vs. Software-Tested vs. Proposed</h2>
+        <h2 class="card-title" style="margin-bottom:12px;">Honest Scope: Mounted Prototype vs. Software Capabilities vs. Future Work</h2>
         <div class="status-grid-3">
           <div class="status-col-box">
-            <h3 class="sub-heading status-text-normal">Physically Tested (Hardware)</h3>
+            <h3 class="sub-heading status-text-normal">Mounted Physical Prototype</h3>
             <ul class="clean-list">
-              <li>Arduino GIGA R1 WiFi + HC-SR04 ultrasonic sensor (with 3.3V resistor divider on <code>D10</code>) streaming live over USB Web Serial at 115200 baud.</li>
-              <li>3D-printed NYC street, secured sensor riser, circulating 5V pump, and removable storm-drain blockage reproducing ponding and drainage recovery.</li>
-              <li>On-device dry-road calibration, 7-sample median filtering, and 3-reading alert confirmation detecting real <strong>CRITICAL</strong> flooding (verified at 2.42 cm on the live dashboard).</li>
+              <li>Arduino GIGA R1 WiFi with HC-SR04 ultrasonic sensor, ADXL345 accelerometer, active buzzer, and RGB LED.</li>
+              <li>3D-printed miniature NYC roadway, removable storm-drain blockage, water reservoir, and recirculating water pump.</li>
+              <li>115200-baud USB Serial telemetry streaming ultrasonic depth, mount stability deviation (<code>g</code>), commanded alarm modes, and calibration status (<code>NORMAL &lt; 0.25 cm</code>, <code>WARNING 0.25&ndash;0.59 cm</code>, <code>CRITICAL &ge; 0.60 cm</code>).</li>
             </ul>
           </div>
 
           <div class="status-col-box">
-            <h3 class="sub-heading status-text-info">Software-Tested (Web &amp; API)</h3>
+            <h3 class="sub-heading status-text-info">Web Dashboard &amp; API Capabilities</h3>
             <ul class="clean-list">
-              <li>Locked dry-road baseline protection, confirmed <code>c</code> recalibration flow, suspicious-reading flagging, and stale/disconnected stream detection.</li>
-              <li>Rolling-window rate of rise, FloodGuard Risk Intelligence (rapid-rise &amp; suspected blocked-drain heuristics), test-session recording, and CSV export.</li>
-              <li>Live Open-Meteo NYC weather &amp; 12-hour forecast, Supabase Auth + RLS Admin Settings, NYC FloodNet historical archive + bookmarks, 6-stage Demo Mode, and optional server-side Gemini AI Assistant (via Render backend).</li>
+              <li>Live mount-stability readout, calibration protection (suspending/resetting predictions on faults or movement), confirmed dry + stationary <code>c</code> recalibration, <code>b</code> buzzer test command, and preserved CRITICAL alarms during faults.</li>
+              <li>Commanded local RGB LED and buzzer mode display (explicitly distinguished from independent physical light/audio verification), rolling-window trend ETA, and test-session CSV recording.</li>
+              <li>Live Open-Meteo NYC weather forecast, Supabase Auth + RLS Admin Settings, NYC FloodNet historical archive, 6-stage Demo Mode, and server-side Gemini AI Assistant (via Render backend).</li>
             </ul>
           </div>
 
           <div class="status-col-box">
-            <h3 class="sub-heading status-text-warn">Proposed / Future (Not Built Yet)</h3>
+            <h3 class="sub-heading status-text-warn">Not Implemented / Future Work</h3>
             <ul class="clean-list">
-              <li>Formal independent accuracy benchmarking (comparing HC-SR04 vs. calibrated ruler/gauge under splashes and vibration).</li>
-              <li>Direct Arduino Wi-Fi cloud upload to Supabase and outdoor waterproof multi-sensor redundancy (float + hydrostatic pressure).</li>
-              <li>Automated relay pump control or motorized flood barriers with hardware safety interlocks.</li>
-              <li>Real-world NYC street field validation and storm-calibrated flood arrival time modeling.</li>
+              <li>Formal independent accuracy benchmarking against a calibrated millimeter ruler across calm and splashing conditions (no accuracy percentage is claimed).</li>
+              <li>Independent hardware feedback sensors to verify physical RGB LED light output or buzzer decibel level.</li>
+              <li>Outdoor weatherproof enclosure, municipal-grade multi-sensor redundancy, and official emergency notification certification &mdash; <strong>this prototype is not an official emergency warning system</strong>.</li>
             </ul>
           </div>
         </div>

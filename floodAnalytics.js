@@ -4,12 +4,12 @@
  *                      Statistical Trend Detection & Early-Warning ETA Engine
  * File: floodAnalytics.js
  *
- * Calibrated for the tested 3D-printed NYC street prototype:
- *   - Default dry-road baseline: ~14.39 cm (auto-calibrated from Arduino serial)
- *   - Experimental alert thresholds:
- *       NORMAL:   < 0.50 cm
- *       WARNING:  0.50 – 1.24 cm
- *       CRITICAL: >= 1.25 cm
+ * Calibrated for the finalized 3D-printed miniature NYC street prototype:
+ *   - Dynamic dry-road baseline (auto-locked from Arduino serial telemetry)
+ *   - Synchronized miniature prototype alert thresholds:
+ *       NORMAL:   < 0.25 cm
+ *       WARNING:  0.25 cm to below 0.60 cm
+ *       CRITICAL: >= 0.60 cm
  *   - Also supports Admin-configured thresholds from Supabase `monitoring_settings`
  *     and larger deep-basin setups.
  *
@@ -27,13 +27,13 @@
 
 export const PROTOTYPE_PRESETS = {
   EXPERIMENTAL_STREET_MODEL: {
-    label: 'Miniature Street Model (0.50 / 1.25 cm)',
-    mountHeightCm: 14.39,
-    warnThresholdCm: 0.50,
-    critThresholdCm: 1.25,
-    minRiseRateCmPerMin: 0.12,
-    stableBandCmPerMin: 0.06,
-    barrierThresholdCm: 1.00
+    label: 'Miniature Street Model (0.25 / 0.60 cm)',
+    mountHeightCm: 7.88,
+    warnThresholdCm: 0.25,
+    critThresholdCm: 0.60,
+    minRiseRateCmPerMin: 0.08,
+    stableBandCmPerMin: 0.04,
+    barrierThresholdCm: 0.50
   },
   DEEP_BASIN_MODEL: {
     label: 'Deep Basin Calibration (6.0 / 12.0 cm)',
@@ -47,12 +47,12 @@ export const PROTOTYPE_PRESETS = {
 };
 
 export const DEFAULT_PROTOTYPE_SETTINGS = {
-  mountHeightCm: 14.39,         // Auto-calibrated dry-road baseline on tested miniature NYC street
-  warnThresholdCm: 0.50,        // Experimental Warning level (Amber: 0.50–1.24 cm)
-  critThresholdCm: 1.25,        // Experimental Critical level (Red: >= 1.25 cm)
-  minRiseRateCmPerMin: 0.12,    // Minimum slope (cm/min) required for Rising / Falling
-  stableBandCmPerMin: 0.06,     // Slope deadband (±cm/min) for Stable classification
-  barrierThresholdCm: 1.00,     // Optional future servo flood barrier trigger threshold
+  mountHeightCm: 7.88,          // Default reference baseline (auto-locked from Arduino dry-road telemetry)
+  warnThresholdCm: 0.25,        // Miniature prototype Warning level (Amber: 0.25 to < 0.60 cm)
+  critThresholdCm: 0.60,        // Miniature prototype Critical level (Red: >= 0.60 cm)
+  minRiseRateCmPerMin: 0.08,    // Minimum slope (cm/min) required for Rising / Falling
+  stableBandCmPerMin: 0.04,     // Slope deadband (±cm/min) for Stable classification
+  barrierThresholdCm: 0.50,     // Optional future servo flood barrier trigger threshold
   staleTimeoutMs: 10000,        // Live serial timeout before showing UNAVAILABLE
   minValidDistanceCm: 2.0,      // HC-SR04 minimum physical sensing range
   dryToleranceCm: 2.0,          // Small acoustic noise allowance beyond dry floor before OUT_OF_RANGE
@@ -677,7 +677,7 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
   const enoughData = rollingWindow.length >= 4 && stats.spanSec >= 3.0;
   const stableBand = Math.max(0.05, Number(cfg.stableBandCmPerMin) || 0.06);
   const minSlope = Math.max(stableBand, Number(cfg.minRiseRateCmPerMin) || 0.12);
-  const minNetDeltaCm = Math.min(0.25, Math.max(0.08, (cfg.critThresholdCm - cfg.warnThresholdCm) * 0.12));
+  const minNetDeltaCm = Math.min(0.25, Math.max(0.05, (cfg.critThresholdCm - cfg.warnThresholdCm) * 0.14));
 
   let trend = 'STABLE';
   let trendLabel = 'Stable';
