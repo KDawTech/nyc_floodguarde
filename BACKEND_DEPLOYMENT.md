@@ -21,6 +21,9 @@ This repository includes a ready-to-use `render.yaml` Blueprint.
      - `ALLOWED_ORIGINS=https://kdawtech.github.io`
      - `RATE_LIMIT_WINDOW_MS=60000`
      - `RATE_LIMIT_MAX_REQUESTS=15`
+     - `GEMINI_MODEL=gemini-4-hydrogen`
+     - `GEMINI_FALLBACK_MODEL=gemini-3.1-flash-lite`
+     - `GEMINI_TIMEOUT_MS=18000`
 5. When prompted for `GEMINI_API_KEY`, paste your Google Gemini API key (stored securely on Render's servers; never committed to Git).
 6. Click **Apply** and wait for the service status to turn **Live**.
 

@@ -724,10 +724,10 @@ export function analyzeWaterTelemetry(rawPackets, settings = DEFAULT_PROTOTYPE_S
   }
 
   // Evaluate flood status:
-  // Arduino confirmed status on calibrated text lines is ALWAYS authoritative.
+  // Arduino-reported status (on text or JSON telemetry frames) is ALWAYS authoritative.
   let status = 'NORMAL';
   let statusSource = 'thresholds';
-  if (latestValid.packetFormat === 'text' && latestValid.reportedStatus) {
+  if ((latestValid.packetFormat === 'text' || latestValid.packetFormat === 'json') && latestValid.reportedStatus) {
     status = latestValid.reportedStatus;
     statusSource = 'arduino_confirmed';
   } else if (filteredDepthCm >= cfg.critThresholdCm) {

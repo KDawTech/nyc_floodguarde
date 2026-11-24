@@ -307,8 +307,184 @@ function sleep(ms: number): Promise<void> {
 
 const UPSTREAM_TIMEOUT_MS = Math.max(
   5000,
-  Number(process.env.GEMINI_TIMEOUT_MS || 25_000) || 25_000
+  Number(process.env.GEMINI_TIMEOUT_MS || 18_000) || 18_000
 );
+const MAX_ASSISTANT_TOTAL_MS = Math.max(
+  UPSTREAM_TIMEOUT_MS + 4000,
+  Number(process.env.GEMINI_TOTAL_BUDGET_MS || 34_000) || 34_000
+);
+
+// Per-model temporary cooldown after transient 503/429 or 404 failures so subsequent
+// requests route immediately to the healthy fallback model without 12s+ stalls.
+const MODEL_COOLDOWN_TRANSIENT_MS = 90_000;
+const MODEL_COOLDOWN_NOT_FOUND_MS = 5 * 60_000;
+const modelCooldownUntil = new Map<string, { untilMs: number; reason: string }>();
+
+interface ClassifiedUpstreamError {
+  code:
+    | 'HIGH_DEMAND_503'
+    | 'QUOTA_429'
+    | 'MODEL_NOT_FOUND_404'
+    | 'AUTH_ERROR'
+    | 'BAD_REQUEST_400'
+    | 'TIMEOUT_504'
+    | 'UPSTREAM_5XX'
+    | 'NETWORK_ERROR'
+    | 'UNKNOWN_ERROR';
+  httpStatus: number;
+  upstreamStatus: number;
+  retryable: boolean;
+  failoverRecommended: boolean;
+  cooldownMs: number;
+  safeDetail: string;
+}
+
+function extractUpstreamStatus(err: unknown, rawMessage: string): number {
+  if (typeof err === 'object' && err !== null) {
+    if ('status' in err && Number.isFinite(Number((err as { status?: number }).status))) {
+      return Number((err as { status?: number }).status);
+    }
+    if ('statusCode' in err && Number.isFinite(Number((err as { statusCode?: number }).statusCode))) {
+      return Number((err as { statusCode?: number }).statusCode);
+    }
+  }
+  const codeMatch = rawMessage.match(/"code"\s*:\s*(\d{3})/);
+  if (codeMatch) return Number(codeMatch[1]);
+  return 0;
+}
+
+function classifyUpstreamError(err: unknown): ClassifiedUpstreamError {
+  const rawMessage = err instanceof Error ? err.message : String(err || 'Unexpected Gemini API error');
+  const upstreamStatus = extractUpstreamStatus(err, rawMessage);
+
+  let parsedMsg = rawMessage;
+  try {
+    const parsed = JSON.parse(rawMessage);
+    if (parsed?.error?.message) parsedMsg = String(parsed.error.message);
+  } catch {
+    // Keep rawMessage
+  }
+  // Redact anything that could resemble an API key just in case
+  const safeDetail = parsedMsg.replace(/AIza[0-9A-Za-z\-_]{10,}/g, '[REDACTED]').slice(0, 260);
+
+  if (upstreamStatus === 401 || upstreamStatus === 403 || /API_KEY_INVALID|PERMISSION_DENIED|invalid api key/i.test(rawMessage)) {
+    return {
+      code: 'AUTH_ERROR',
+      httpStatus: upstreamStatus === 403 ? 403 : 400,
+      upstreamStatus: upstreamStatus || 403,
+      retryable: false,
+      failoverRecommended: false,
+      cooldownMs: 0,
+      safeDetail
+    };
+  }
+  if (upstreamStatus === 404 || /NOT_FOUND|is not found for API version/i.test(rawMessage)) {
+    return {
+      code: 'MODEL_NOT_FOUND_404',
+      httpStatus: 502,
+      upstreamStatus: 404,
+      retryable: false,
+      failoverRecommended: true,
+      cooldownMs: MODEL_COOLDOWN_NOT_FOUND_MS,
+      safeDetail
+    };
+  }
+  if (upstreamStatus === 429 || /RESOURCE_EXHAUSTED|quota|rate limit/i.test(rawMessage)) {
+    return {
+      code: 'QUOTA_429',
+      httpStatus: 429,
+      upstreamStatus: 429,
+      retryable: true,
+      failoverRecommended: true,
+      cooldownMs: MODEL_COOLDOWN_TRANSIENT_MS,
+      safeDetail
+    };
+  }
+  if (upstreamStatus === 503 || /UNAVAILABLE|high demand|overloaded|temporarily unavailable/i.test(rawMessage)) {
+    return {
+      code: 'HIGH_DEMAND_503',
+      httpStatus: 503,
+      upstreamStatus: 503,
+      retryable: true,
+      failoverRecommended: true,
+      cooldownMs: MODEL_COOLDOWN_TRANSIENT_MS,
+      safeDetail
+    };
+  }
+  if (upstreamStatus === 504 || /UPSTREAM_TIMEOUT|timed out|DEADLINE_EXCEEDED/i.test(rawMessage)) {
+    return {
+      code: 'TIMEOUT_504',
+      httpStatus: 504,
+      upstreamStatus: 504,
+      retryable: true,
+      failoverRecommended: true,
+      cooldownMs: 45_000,
+      safeDetail
+    };
+  }
+  if (upstreamStatus >= 500 && upstreamStatus < 600) {
+    return {
+      code: 'UPSTREAM_5XX',
+      httpStatus: 503,
+      upstreamStatus,
+      retryable: true,
+      failoverRecommended: true,
+      cooldownMs: 45_000,
+      safeDetail
+    };
+  }
+  if (/fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(rawMessage)) {
+    return {
+      code: 'NETWORK_ERROR',
+      httpStatus: 503,
+      upstreamStatus: 0,
+      retryable: true,
+      failoverRecommended: true,
+      cooldownMs: 0,
+      safeDetail
+    };
+  }
+  if (upstreamStatus === 400) {
+    return {
+      code: 'BAD_REQUEST_400',
+      httpStatus: 400,
+      upstreamStatus: 400,
+      retryable: false,
+      failoverRecommended: false,
+      cooldownMs: 0,
+      safeDetail
+    };
+  }
+  return {
+    code: 'UNKNOWN_ERROR',
+    httpStatus: 502,
+    upstreamStatus,
+    retryable: false,
+    failoverRecommended: false,
+    cooldownMs: 0,
+    safeDetail
+  };
+}
+
+function getOrderedModels(nowMs = Date.now()): string[] {
+  const unique =
+    FALLBACK_MODEL_NAME && FALLBACK_MODEL_NAME !== MODEL_NAME
+      ? [MODEL_NAME, FALLBACK_MODEL_NAME]
+      : [MODEL_NAME];
+
+  const healthy: string[] = [];
+  const cooling: string[] = [];
+  for (const m of unique) {
+    const cd = modelCooldownUntil.get(m);
+    if (cd && cd.untilMs > nowMs) {
+      cooling.push(m);
+    } else {
+      if (cd) modelCooldownUntil.delete(m);
+      healthy.push(m);
+    }
+  }
+  return [...healthy, ...cooling];
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -328,16 +504,30 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 async function generateAssistantReply(
   ai: GoogleGenAI,
   prompt: string
-): Promise<{ text: string; model: string }> {
-  const modelsToTry =
-    FALLBACK_MODEL_NAME && FALLBACK_MODEL_NAME !== MODEL_NAME
-      ? [MODEL_NAME, FALLBACK_MODEL_NAME]
-      : [MODEL_NAME];
+): Promise<{ text: string; model: string; attempts: number; usedFallback: boolean }> {
+  const startedAtMs = Date.now();
+  const modelsToTry = getOrderedModels(startedAtMs);
+  let totalAttempts = 0;
   let lastError: unknown;
 
-  for (const model of modelsToTry) {
-    const maxAttempts = model === MODEL_NAME ? 2 : 1;
+  for (let mIdx = 0; mIdx < modelsToTry.length; mIdx++) {
+    const model = modelsToTry[mIdx];
+    const hasNextModel = mIdx < modelsToTry.length - 1;
+    // Allow 1 fast try on primary when a healthy fallback exists (so 503 failover is fast),
+    // and up to 2 attempts with exponential backoff on the final/fallback model.
+    const maxAttempts = hasNextModel ? 1 : 2;
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const elapsedTotal = Date.now() - startedAtMs;
+      const remainingBudget = MAX_ASSISTANT_TOTAL_MS - elapsedTotal;
+      if (remainingBudget < 3500 && totalAttempts > 0) {
+        break;
+      }
+
+      totalAttempts += 1;
+      const attemptStart = Date.now();
+      const attemptTimeout = Math.min(UPSTREAM_TIMEOUT_MS, Math.max(4000, remainingBudget));
+
       try {
         const config: Record<string, unknown> = {
           systemInstruction: buildSystemInstruction()
@@ -351,25 +541,56 @@ async function generateAssistantReply(
             contents: prompt,
             config
           }),
-          UPSTREAM_TIMEOUT_MS
+          attemptTimeout
         );
-        return { text: (response.text || '').trim(), model };
+        // Clear any prior cooldown on success
+        modelCooldownUntil.delete(model);
+        return {
+          text: (response.text || '').trim(),
+          model,
+          attempts: totalAttempts,
+          usedFallback: model !== MODEL_NAME
+        };
       } catch (err: unknown) {
         lastError = err;
-        const msg = err instanceof Error ? err.message : '';
-        const status =
-          typeof err === 'object' && err !== null && 'status' in err
-            ? Number((err as { status?: number }).status)
-            : 0;
-        const isTransient = status === 503 || /UNAVAILABLE|high demand|overloaded/i.test(msg);
-        if (isTransient && attempt < maxAttempts) {
-          await sleep(1200);
-          continue;
+        const info = classifyUpstreamError(err);
+        const attemptMs = Date.now() - attemptStart;
+
+        console.warn(
+          `[FloodGuard Assistant] Upstream attempt failed: model=${model} attempt=${attempt}/${maxAttempts} code=${info.code} status=${info.upstreamStatus} ms=${attemptMs} detail="${info.safeDetail}"`
+        );
+
+        if (info.cooldownMs > 0) {
+          modelCooldownUntil.set(model, {
+            untilMs: Date.now() + info.cooldownMs,
+            reason: info.code
+          });
         }
-        if (isTransient) {
-          // Try next fallback model if available
+
+        // Permanent auth or invalid-request errors: stop immediately
+        if (!info.retryable && !info.failoverRecommended) {
+          throw err;
+        }
+
+        // On 404 or 429 on a specific model, immediately fail over without retrying same model
+        if ((info.code === 'MODEL_NOT_FOUND_404' || info.code === 'QUOTA_429') && hasNextModel) {
           break;
         }
+
+        // Limited retry with bounded exponential backoff + jitter on same model
+        if (info.retryable && attempt < maxAttempts) {
+          const backoffMs = Math.min(2500, 700 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250));
+          if (Date.now() - startedAtMs + backoffMs + 3500 < MAX_ASSISTANT_TOTAL_MS) {
+            await sleep(backoffMs);
+            continue;
+          }
+        }
+
+        // Move to fallback model if available
+        if (info.failoverRecommended && hasNextModel) {
+          break;
+        }
+
         throw err;
       }
     }
@@ -424,26 +645,37 @@ async function startServer() {
   // Render & monitoring health check endpoint
   app.get('/api/health', (_req, res) => {
     const configured = Boolean((process.env.GEMINI_API_KEY || '').trim());
+    const orderedModels = getOrderedModels();
     res.json({
       status: 'ok',
       service: 'nyc-floodguard-backend',
       assistantConfigured: configured,
       model: MODEL_NAME,
+      fallbackModel: FALLBACK_MODEL_NAME,
+      activePreferredModel: orderedModels[0] || MODEL_NAME,
       timestamp: new Date().toISOString()
     });
   });
 
   app.get('/api/assistant/status', (_req, res) => {
     const configured = Boolean((process.env.GEMINI_API_KEY || '').trim());
+    const orderedModels = getOrderedModels();
+    const primaryCooldown = modelCooldownUntil.get(MODEL_NAME);
+    const inFallbackCooldown = Boolean(primaryCooldown && primaryCooldown.untilMs > Date.now());
     res.json({
       available: configured,
       model: MODEL_NAME,
+      fallbackModel: FALLBACK_MODEL_NAME,
+      activePreferredModel: orderedModels[0] || MODEL_NAME,
+      inFallbackCooldown,
       rateLimit: {
         maxRequests: RATE_LIMIT_MAX_REQUESTS,
         windowMs: RATE_LIMIT_WINDOW_MS
       },
       note: configured
-        ? 'Server-side Gemini AI Assistant is ready (informational explanations only).'
+        ? inFallbackCooldown
+          ? `Server-side Gemini AI Assistant is ready (routing via ${orderedModels[0]} while primary model recovers from high demand).`
+          : 'Server-side Gemini AI Assistant is ready (informational explanations only).'
         : 'Server-side GEMINI_API_KEY is not configured in the server environment.'
     });
   });
@@ -457,75 +689,111 @@ async function startServer() {
           : undefined;
 
       if (!question) {
-        return res.status(400).json({ error: 'Please enter a question for the FloodGuard Assistant.' });
+        return res.status(400).json({
+          error: 'Please enter a question for the FloodGuard Assistant.',
+          code: 'EMPTY_QUESTION',
+          retryable: false
+        });
       }
       if (question.length > 600) {
-        return res.status(400).json({ error: 'Question is too long (maximum 600 characters).' });
+        return res.status(400).json({
+          error: 'Question is too long (maximum 600 characters).',
+          code: 'QUESTION_TOO_LONG',
+          retryable: false
+        });
       }
 
       const ai = getGeminiClient();
       if (!ai) {
         return res.status(503).json({
           error:
-            'AI Assistant is currently unavailable because GEMINI_API_KEY is not configured on the server. Rule-based FloodGuard Risk Intelligence remains fully active.'
+            'AI Assistant is currently unavailable because GEMINI_API_KEY is not configured on the server. Rule-based FloodGuard Risk Intelligence remains fully active.',
+          code: 'MISSING_API_KEY',
+          retryable: false,
+          fallbackActive: true
         });
       }
 
       const prompt = `${formatContextBlock(context)}\n\nUser Question: ${question}`;
-      const { text: answer, model: modelUsed } = await generateAssistantReply(ai, prompt);
+      const { text: answer, model: modelUsed, attempts, usedFallback } = await generateAssistantReply(ai, prompt);
 
       if (!answer) {
         return res.status(502).json({
-          error: 'The AI service returned an empty response. Please try asking again.'
+          error: 'The AI service returned an empty response. Please try asking again.',
+          code: 'EMPTY_RESPONSE',
+          retryable: true,
+          fallbackActive: true
         });
       }
 
       return res.json({
         answer,
         model: modelUsed,
+        usedFallback,
+        attempts,
         informationalOnly: true,
         generatedAt: new Date().toISOString()
       });
     } catch (err: unknown) {
-      const rawMessage = err instanceof Error ? err.message : 'Unexpected server error calling Gemini API.';
-      const status =
-        typeof err === 'object' && err !== null && 'status' in err && Number.isFinite(Number((err as { status?: number }).status))
-          ? Number((err as { status?: number }).status)
-          : 500;
+      const info = classifyUpstreamError(err);
 
-      if (status === 403 || status === 400 || /API_KEY_INVALID|PERMISSION_DENIED/i.test(rawMessage)) {
-        return res.status(status === 403 ? 403 : 400).json({
-          error: 'Gemini API key was rejected. Check GEMINI_API_KEY in the server environment.'
+      if (info.code === 'AUTH_ERROR') {
+        return res.status(info.httpStatus).json({
+          error: 'Gemini API key was rejected. Check GEMINI_API_KEY in the Render/server environment.',
+          code: info.code,
+          upstreamStatus: info.upstreamStatus,
+          retryable: false,
+          fallbackActive: true
         });
       }
-      if (status === 429 || /RESOURCE_EXHAUSTED/i.test(rawMessage)) {
+      if (info.code === 'QUOTA_429') {
         return res.status(429).json({
-          error: 'Gemini API rate limit reached. Please wait a moment and try again.'
+          error:
+            'Gemini API quota/rate limit reached (HTTP 429). Please wait a moment and try again — rule-based FloodGuard Risk Intelligence remains active.',
+          code: info.code,
+          upstreamStatus: info.upstreamStatus,
+          retryable: true,
+          retryAfterSeconds: 15,
+          fallbackActive: true
         });
       }
-      if (status === 504 || /timed out/i.test(rawMessage)) {
+      if (info.code === 'TIMEOUT_504') {
         return res.status(504).json({
           error:
-            'The AI service timed out before responding. Please try asking again — rule-based FloodGuard Risk Intelligence remains active.'
+            'The AI service timed out before responding (HTTP 504). Please try asking again — rule-based FloodGuard Risk Intelligence remains active.',
+          code: info.code,
+          upstreamStatus: info.upstreamStatus,
+          retryable: true,
+          fallbackActive: true
         });
       }
-      if (status === 503 || /UNAVAILABLE|high demand|overloaded/i.test(rawMessage)) {
+      if (info.code === 'HIGH_DEMAND_503' || info.code === 'UPSTREAM_5XX' || info.code === 'NETWORK_ERROR') {
         return res.status(503).json({
           error:
-            'The AI service is temporarily experiencing high demand. Please try again in a few seconds — rule-based FloodGuard Risk Intelligence remains active.'
+            'Gemini AI models are temporarily experiencing high demand (HTTP 503) even after automatic retry and model failover. Please try again in a few seconds — rule-based FloodGuard Risk Intelligence remains active.',
+          code: info.code,
+          upstreamStatus: info.upstreamStatus,
+          retryable: true,
+          retryAfterSeconds: 5,
+          fallbackActive: true
         });
       }
-      let friendlyMsg = rawMessage;
-      try {
-        const parsed = JSON.parse(rawMessage);
-        if (parsed?.error?.message) {
-          friendlyMsg = String(parsed.error.message);
-        }
-      } catch {
-        // Keep rawMessage if not JSON
+      if (info.code === 'MODEL_NOT_FOUND_404') {
+        return res.status(502).json({
+          error:
+            'The configured Gemini model is unavailable for this API key (HTTP 404). Verify GEMINI_MODEL and GEMINI_FALLBACK_MODEL in your server environment.',
+          code: info.code,
+          upstreamStatus: info.upstreamStatus,
+          retryable: false,
+          fallbackActive: true
+        });
       }
-      return res.status(502).json({
-        error: `AI Assistant request failed: ${friendlyMsg}`
+      return res.status(info.httpStatus).json({
+        error: `AI Assistant request failed: ${info.safeDetail}`,
+        code: info.code,
+        upstreamStatus: info.upstreamStatus,
+        retryable: info.retryable,
+        fallbackActive: true
       });
     }
   });

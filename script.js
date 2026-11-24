@@ -329,6 +329,9 @@ function refreshLucideIcons() {
     loading: false,
     pendingQuestion: '',
     pendingAt: '',
+    retryNote: '',
+    lastFailedQuestion: '',
+    retryable: false,
     expanded: false,
     copiedId: null,
     error: '',
@@ -711,8 +714,15 @@ function refreshLucideIcons() {
 
     if (settingsRes.status === 'ok' && settingsRes.settings) {
       const incoming = settingsRes.settings;
+      const inWarn = Number(incoming.warnThresholdCm);
+      const inCrit = Number(incoming.critThresholdCm);
       const isLegacyThreshold =
-        Number(incoming.warnThresholdCm) >= 0.45 || Number(incoming.critThresholdCm) >= 1.20;
+        !Number.isFinite(inWarn) ||
+        !Number.isFinite(inCrit) ||
+        inWarn <= 0 ||
+        inCrit <= inWarn ||
+        inWarn >= 0.45 ||
+        inCrit >= 1.20;
 
       prototypeSettingsState.source = 'supabase';
       prototypeSettingsState.status = 'ok';
@@ -883,7 +893,10 @@ function refreshLucideIcons() {
   function appendSystemAlertEvent(nextStatus, noteText = '') {
     const nowMs = Date.now();
     const prevStatus = telemetryState.lastAlertStatus || 'LIVE';
-    telemetryState.lastAlertStatus = nextStatus;
+    // Operational commands (like BUZZER_TEST) are logged without overwriting the tracked flood status
+    if (nextStatus !== 'BUZZER_TEST') {
+      telemetryState.lastAlertStatus = nextStatus;
+    }
 
     telemetryState.alertHistory.unshift({
       timestampMs: nowMs,
@@ -1020,10 +1033,15 @@ function refreshLucideIcons() {
    */
   function getEffectiveThresholds() {
     const base = { ...prototypeSettingsState.values };
-    if (
-      !prototypeSettingsState.explicitAdminSave &&
-      (Number(base.warnThresholdCm) >= 0.45 || Number(base.critThresholdCm) >= 1.20)
-    ) {
+    const warn = Number(base.warnThresholdCm);
+    const crit = Number(base.critThresholdCm);
+    const isInvalidOrLegacy =
+      !Number.isFinite(warn) ||
+      !Number.isFinite(crit) ||
+      warn <= 0 ||
+      crit <= warn ||
+      (!prototypeSettingsState.explicitAdminSave && (warn >= 0.45 || crit >= 1.20));
+    if (isInvalidOrLegacy) {
       return {
         ...base,
         warnThresholdCm: PROTOTYPE_PRESETS.EXPERIMENTAL_STREET_MODEL.warnThresholdCm,
@@ -1489,8 +1507,8 @@ function refreshLucideIcons() {
     telemetryState.demoStageIndex = idx;
     telemetryState.demoStageTickCount = 0;
 
-    // Position starting depth cleanly when manually jumping stages
-    const stageStartDepths = [0.08, 0.22, 0.56, 1.32, 1.65, 0.40];
+    // Position starting depth cleanly for 0.25 / 0.60 cm thresholds when manually jumping stages
+    const stageStartDepths = [0.06, 0.20, 0.35, 0.65, 0.50, 0.12];
     if (announce) {
       telemetryState.simCurrentDepthCm = stageStartDepths[idx];
       showToast(`DEMO MODE: ${DEMO_STAGES[idx].name}`, idx === 3 ? 'CRITICAL' : idx === 2 ? 'WARNING' : 'NORMAL');
@@ -2375,11 +2393,12 @@ function refreshLucideIcons() {
         'Rely on visual observation and official NYC Emergency Management / NWS alerts whenever sensor telemetry is paused.'
       ];
     } else if (status === 'CRITICAL') {
+      const effCfg = getEffectiveThresholds();
       card.classList.add('guidance-critical');
       tag.className = 'status-tag tag-critical';
       tag.textContent = 'CRITICAL ACTION';
       sub.textContent = depthStr
-        ? `Critical standing water detected (${depthStr} >= ${prototypeSettingsState.values.critThresholdCm.toFixed(2)} cm) — immediate safety precautions recommended.`
+        ? `Critical standing water detected (${depthStr} >= ${effCfg.critThresholdCm.toFixed(2)} cm) — immediate safety precautions recommended.`
         : 'Critical standing water detected — immediate safety precautions recommended.';
       items = [
         'Avoid walking, cycling, or driving through flooded roadways and underpasses — never cross moving or standing street water.',
@@ -2405,11 +2424,12 @@ function refreshLucideIcons() {
         'Monitor live Open-Meteo rainfall rates and official NWS / Notify NYC advisories for intensifying storms.'
       ];
     } else if (status === 'NORMAL') {
+      const effCfg = getEffectiveThresholds();
       card.classList.add('guidance-normal');
       tag.className = 'status-tag tag-normal';
       tag.textContent = 'NORMAL — ROUTINE';
       sub.textContent = depthStr
-        ? `Street depth is within normal range (${depthStr} < ${prototypeSettingsState.values.warnThresholdCm.toFixed(2)} cm).`
+        ? `Street depth is within normal range (${depthStr} < ${effCfg.warnThresholdCm.toFixed(2)} cm).`
         : 'Street depth is within normal range.';
       items = [
         'Normal drainage conditions on the monitored street surface — continue routine monitoring.',
@@ -3593,74 +3613,120 @@ function refreshLucideIcons() {
 
     const apiBase = getAssistantApiBase();
     const endpoint = buildAssistantEndpoint('/api/assistant');
+    const maxClientAttempts = 2;
 
     aiAssistantState.loading = true;
     aiAssistantState.pendingQuestion = question;
     aiAssistantState.pendingAt = new Date().toISOString();
+    aiAssistantState.retryNote = '';
+    aiAssistantState.lastFailedQuestion = '';
+    aiAssistantState.retryable = false;
     aiAssistantState.statusState = 'processing';
     aiAssistantState.statusLabel = 'Processing';
     aiAssistantState.error = '';
     renderAiAssistantPanel();
 
     try {
-      const resp = await fetchWithTimeout(
-        endpoint,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({
+      let lastError = null;
+      let lastRetryable = false;
+
+      for (let attempt = 1; attempt <= maxClientAttempts; attempt++) {
+        try {
+          const resp = await fetchWithTimeout(
+            endpoint,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+              body: JSON.stringify({
+                question,
+                context: buildAssistantContextSnapshot()
+              })
+            },
+            45000
+          );
+
+          const contentType = resp.headers.get('content-type') || '';
+          if (!contentType.includes('application/json')) {
+            const isTransientGateway = resp.status === 502 || resp.status === 503 || resp.status === 504;
+            const err = new Error(
+              apiBase
+                ? `Configured AI backend (${apiBase}) returned HTTP ${resp.status} (non-JSON). Render free instances may be waking up or temporarily busy.`
+                : 'AI Assistant backend is not configured for this static site. Deploy the backend on Render and set VITE_ASSISTANT_API_URL in GitHub Actions Variables.'
+            );
+            err.retryable = isTransientGateway;
+            throw err;
+          }
+
+          const data = await resp.json();
+          if (!resp.ok) {
+            const isRetryable =
+              Boolean(data.retryable) || resp.status === 502 || resp.status === 503 || resp.status === 504;
+            // Do not auto-retry 429 rate-limit responses immediately
+            const allowAutoRetry = isRetryable && resp.status !== 429;
+            const err = new Error(data.error || `AI Assistant returned HTTP ${resp.status}.`);
+            err.retryable = isRetryable;
+            err.allowAutoRetry = allowAutoRetry;
+            throw err;
+          }
+
+          aiAssistantState.messages.push({
+            id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             question,
-            context: buildAssistantContextSnapshot()
-          })
-        },
-        45000
-      );
+            askedAt: aiAssistantState.pendingAt,
+            answer: data.answer,
+            model: data.model || 'gemini-4-hydrogen',
+            generatedAt: data.generatedAt || new Date().toISOString()
+          });
+          if (aiAssistantState.messages.length > 20) {
+            aiAssistantState.messages = aiAssistantState.messages.slice(-20);
+          }
+          aiAssistantState.available = true;
+          aiAssistantState.statusState = 'ready';
+          aiAssistantState.statusLabel = 'Gemini Ready';
+          aiAssistantState.statusNote = '';
+          aiAssistantState.retryNote = '';
+          aiAssistantState.lastFailedQuestion = '';
+          aiAssistantState.retryable = false;
+          return;
+        } catch (err) {
+          lastError = err;
+          const isAbort = Boolean(err && err.name === 'AbortError');
+          const allowAutoRetry =
+            err && typeof err.allowAutoRetry === 'boolean'
+              ? err.allowAutoRetry
+              : Boolean(err?.retryable) || isAbort;
+          lastRetryable = Boolean(err?.retryable) || isAbort;
 
-      const contentType = resp.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        throw new Error(
-          apiBase
-            ? `Configured AI backend (${apiBase}) returned a non-JSON response (HTTP ${resp.status}). Verify the Render service URL and deployment status.`
-            : 'AI Assistant backend is not configured for this static site. Deploy the backend on Render and set VITE_ASSISTANT_API_URL in GitHub Actions Variables.'
-        );
+          if (allowAutoRetry && attempt < maxClientAttempts) {
+            aiAssistantState.statusLabel = 'Retrying…';
+            aiAssistantState.retryNote = 'Temporary backend/model load detected — retrying once automatically…';
+            renderAiAssistantPanel();
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            continue;
+          }
+          break;
+        }
       }
 
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || `AI Assistant returned HTTP ${resp.status}.`);
-      }
-
-      aiAssistantState.messages.push({
-        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        question,
-        askedAt: aiAssistantState.pendingAt,
-        answer: data.answer,
-        model: data.model || 'gemini-4-hydrogen',
-        generatedAt: data.generatedAt || new Date().toISOString()
-      });
-      if (aiAssistantState.messages.length > 20) {
-        aiAssistantState.messages = aiAssistantState.messages.slice(-20);
-      }
-      aiAssistantState.available = true;
-      aiAssistantState.statusState = 'ready';
-      aiAssistantState.statusLabel = 'Gemini Ready';
-      aiAssistantState.statusNote = '';
-    } catch (err) {
-      if (err && err.name === 'AbortError') {
+      if (lastError && lastError.name === 'AbortError') {
         aiAssistantState.error =
           'The request timed out while waiting for the AI backend (Render free instances can take ~30 seconds to wake up). Please try again.';
         aiAssistantState.statusState = 'offline';
         aiAssistantState.statusLabel = 'Offline';
+        aiAssistantState.retryable = true;
       } else {
         aiAssistantState.error =
-          err instanceof Error ? err.message : 'Unable to reach AI FloodGuard Assistant.';
+          lastError instanceof Error ? lastError.message : 'Unable to reach AI FloodGuard Assistant.';
         aiAssistantState.statusState = aiAssistantState.available ? 'ready' : 'offline';
         aiAssistantState.statusLabel = aiAssistantState.available ? 'Gemini Ready' : 'Offline';
+        aiAssistantState.retryable = lastRetryable;
       }
+      aiAssistantState.lastFailedQuestion = question;
     } finally {
       aiAssistantState.loading = false;
       aiAssistantState.pendingQuestion = '';
       aiAssistantState.pendingAt = '';
+      aiAssistantState.retryNote = '';
       renderAiAssistantPanel();
     }
   }
@@ -3698,7 +3764,9 @@ function refreshLucideIcons() {
     }
 
     const activeState = aiAssistantState.loading ? 'processing' : aiAssistantState.statusState;
-    const activeLabel = aiAssistantState.loading ? 'Processing' : aiAssistantState.statusLabel;
+    const activeLabel = aiAssistantState.loading
+      ? aiAssistantState.statusLabel || 'Processing'
+      : aiAssistantState.statusLabel;
 
     if (statusTag) {
       statusTag.className = `ai-status-badge ai-status-${activeState}`;
@@ -3731,7 +3799,29 @@ function refreshLucideIcons() {
         aiAssistantState.error ||
         (!aiAssistantState.available && aiAssistantState.statusChecked ? aiAssistantState.statusNote : '');
       errEl.classList.toggle('hidden', !showMsg);
-      errEl.textContent = showMsg;
+      if (showMsg) {
+        const intel = telemetryState.latestRiskIntel;
+        const fallbackSummary =
+          intel && intel.riskLabel
+            ? `${intel.riskLabel}${intel.observedSummary ? ` — ${intel.observedSummary}` : ''}`
+            : '';
+        const retryBtnHtml =
+          aiAssistantState.retryable && aiAssistantState.lastFailedQuestion && !aiAssistantState.loading
+            ? `<button type="button" id="btnRetryAssistant" class="btn btn-outline btn-xs ai-retry-btn">Retry</button>`
+            : '';
+        const fallbackHtml = fallbackSummary
+          ? `<div class="ai-fallback-summary"><strong>Rule-Based Risk Intelligence (Active):</strong> ${escapeHtml(fallbackSummary)}</div>`
+          : '';
+        errEl.innerHTML = `
+          <div class="ai-error-row">
+            <span>${escapeHtml(showMsg)}</span>
+            ${retryBtnHtml}
+          </div>
+          ${fallbackHtml}
+        `;
+      } else {
+        errEl.textContent = '';
+      }
     }
 
     if (!box) return;
@@ -3810,7 +3900,7 @@ function refreshLucideIcons() {
                 <span class="typing-dot"></span>
                 <span class="typing-dot"></span>
                 <span class="typing-dot"></span>
-                <span class="typing-label">Analyzing live telemetry &amp; NYC weather&hellip;</span>
+                <span class="typing-label">${escapeHtml(aiAssistantState.retryNote || 'Analyzing live telemetry & NYC weather…')}</span>
               </div>
             </div>
           </div>
@@ -5009,9 +5099,19 @@ function refreshLucideIcons() {
     document.getElementById('btnClearAssistant')?.addEventListener('click', () => {
       aiAssistantState.messages = [];
       aiAssistantState.error = '';
+      aiAssistantState.lastFailedQuestion = '';
+      aiAssistantState.retryable = false;
       aiAssistantState.copiedId = null;
       renderAiAssistantPanel();
       showToast('Conversation cleared.', 'NORMAL');
+    });
+
+    document.getElementById('aiErrorNotice')?.addEventListener('click', (e) => {
+      const retryBtn = e.target.closest('#btnRetryAssistant');
+      if (!retryBtn || aiAssistantState.loading) return;
+      if (aiAssistantState.lastFailedQuestion) {
+        askFloodGuardAssistant(aiAssistantState.lastFailedQuestion);
+      }
     });
 
     document.getElementById('aiMessagesBox')?.addEventListener('click', async (e) => {

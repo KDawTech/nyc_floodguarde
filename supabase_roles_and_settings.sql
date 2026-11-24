@@ -95,11 +95,11 @@ CREATE POLICY "Users can view own profile"
 -- 2. Prototype Monitoring Settings Table (Single Configuration Row id = 1)
 CREATE TABLE IF NOT EXISTS public.monitoring_settings (
   id integer PRIMARY KEY CHECK (id = 1),
-  mount_height_cm numeric(6, 2) NOT NULL DEFAULT 25.0 CHECK (mount_height_cm > 5 AND mount_height_cm <= 400),
-  warn_threshold_cm numeric(6, 2) NOT NULL DEFAULT 6.0 CHECK (warn_threshold_cm > 0),
-  crit_threshold_cm numeric(6, 2) NOT NULL DEFAULT 12.0 CHECK (crit_threshold_cm > warn_threshold_cm),
-  min_rise_rate_cm_per_min numeric(5, 2) NOT NULL DEFAULT 0.25 CHECK (min_rise_rate_cm_per_min >= 0.05),
-  barrier_threshold_cm numeric(6, 2) NOT NULL DEFAULT 10.0 CHECK (barrier_threshold_cm > 0),
+  mount_height_cm numeric(6, 2) NOT NULL DEFAULT 7.88 CHECK (mount_height_cm > 5 AND mount_height_cm <= 400),
+  warn_threshold_cm numeric(6, 2) NOT NULL DEFAULT 0.25 CHECK (warn_threshold_cm > 0),
+  crit_threshold_cm numeric(6, 2) NOT NULL DEFAULT 0.60 CHECK (crit_threshold_cm > warn_threshold_cm),
+  min_rise_rate_cm_per_min numeric(5, 2) NOT NULL DEFAULT 0.08 CHECK (min_rise_rate_cm_per_min >= 0.05),
+  barrier_threshold_cm numeric(6, 2) NOT NULL DEFAULT 0.50 CHECK (barrier_threshold_cm > 0),
   updated_by uuid REFERENCES auth.users(id),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -112,7 +112,7 @@ INSERT INTO public.monitoring_settings (
   min_rise_rate_cm_per_min,
   barrier_threshold_cm
 )
-VALUES (1, 25.0, 6.0, 12.0, 0.25, 10.0)
+VALUES (1, 7.88, 0.25, 0.60, 0.08, 0.50)
 ON CONFLICT (id) DO NOTHING;
 
 ALTER TABLE public.monitoring_settings ENABLE ROW LEVEL SECURITY;

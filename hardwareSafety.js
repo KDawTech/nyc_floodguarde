@@ -385,6 +385,16 @@ export function applyPacketToHardwareSafety(safety, packet) {
         safety.confirmedCritical.confirmedAtMs = safety.confirmedCritical.confirmedAtMs || nowMs;
         safety.confirmedCritical.preservedDuringFault = false;
       }
+    } else if (packet.alarmMode === 'NORMAL' || packet.alarmMode === 'WARNING') {
+      // If no fault/calibration hold is active, keep confirmedCritical aligned with Arduino's Alarm Mode
+      if (!safety.sensorErrorActive && !safety.calibrationRequired && !safety.calibrationInProgress && !safety.calibrationFailed) {
+        safety.confirmedCritical = {
+          active: false,
+          depthCm: null,
+          confirmedAtMs: null,
+          preservedDuringFault: false
+        };
+      }
     }
     return result;
   }
