@@ -258,6 +258,23 @@
          SECTION 2: FLOODGUARD 2.0 MONITORING DASHBOARD (#view-dashboard)
          ================================================================== -->
     <section id="view-dashboard" class="view-section" aria-labelledby="dashHeading">
+      <!-- Fullscreen Presentation Mode Bar (visible only in Presentation Mode) -->
+      <div id="presentationTopBar" class="presentation-topbar hidden" role="region" aria-label="Presentation Mode Controls">
+        <div class="presentation-brand-group">
+          <span class="presentation-title">NYC FloodGuard 2.0</span>
+          <span class="presentation-sep" aria-hidden="true">&middot;</span>
+          <span class="presentation-subtitle">Live Flood Operations Presentation</span>
+          <span id="presSourceMirror" class="status-tag tag-neutral">OFFLINE</span>
+        </div>
+        <div class="presentation-actions">
+          <span id="presClockText" class="mono-text presentation-clock">--:--:--</span>
+          <button type="button" id="btnExitPresentationMode" class="btn btn-sm btn-outline">
+            <i data-lucide="minimize-2" class="ui-icon" aria-hidden="true"></i>
+            <span>Exit Presentation (Esc)</span>
+          </button>
+        </div>
+      </div>
+
       <!-- Top Source Mode & Connection Command Bar -->
       <div class="section-header dash-top-header">
         <div>
@@ -278,10 +295,26 @@
 
         <div class="connection-controls-wrap">
           <div class="connection-controls">
-            <button type="button" id="btnConnectArduino" class="btn btn-cyan">Connect Arduino (USB)</button>
-            <button type="button" id="btnOpenRecalibrate" class="btn btn-outline hidden" title="Send 'c' serial command to recalibrate dry-road baseline">Recalibrate Dry Baseline (c)</button>
-            <button type="button" id="btnDisconnectArduino" class="btn btn-danger hidden">Disconnect Arduino</button>
-            <button type="button" id="btnToggleSimBackup" class="btn btn-outline">Start Demo Mode</button>
+            <button type="button" id="btnConnectArduino" class="btn btn-cyan">
+              <i data-lucide="usb" class="ui-icon" aria-hidden="true"></i>
+              <span>Connect Arduino (USB)</span>
+            </button>
+            <button type="button" id="btnOpenRecalibrate" class="btn btn-outline hidden" title="Send 'c' serial command to recalibrate dry-road baseline">
+              <i data-lucide="rotate-ccw" class="ui-icon" aria-hidden="true"></i>
+              <span>Recalibrate (c)</span>
+            </button>
+            <button type="button" id="btnDisconnectArduino" class="btn btn-danger hidden">
+              <i data-lucide="unplug" class="ui-icon" aria-hidden="true"></i>
+              <span>Disconnect</span>
+            </button>
+            <button type="button" id="btnToggleSimBackup" class="btn btn-outline">
+              <i data-lucide="play-circle" class="ui-icon" aria-hidden="true"></i>
+              <span>Start Demo Mode</span>
+            </button>
+            <button type="button" id="btnTogglePresentationMode" class="btn btn-primary" title="Switch to fullscreen presentation view emphasizing live telemetry, predictions, and flood alerts">
+              <i data-lucide="monitor" class="ui-icon" aria-hidden="true"></i>
+              <span>Presentation Mode</span>
+            </button>
           </div>
           <p class="serial-hint-text">
             Close the Arduino IDE Serial Monitor before connecting. Web Serial requires desktop Chrome or Edge.
@@ -309,9 +342,14 @@
 
       <!-- Active Flood / Connection Lost / Stale Data Banner -->
       <div id="dashAlertBanner" class="alert-banner hidden" role="alert" aria-live="assertive">
-        <div class="alert-banner-content">
-          <strong id="dashAlertBannerTitle">FLOOD WARNING ACTIVE</strong>
-          <span id="dashAlertBannerBody">Water depth has crossed the configured alert threshold.</span>
+        <div class="alert-banner-lead">
+          <span class="alert-banner-icon" aria-hidden="true">
+            <i data-lucide="alert-octagon" class="ui-icon ui-icon-lg"></i>
+          </span>
+          <div class="alert-banner-content">
+            <strong id="dashAlertBannerTitle">FLOOD WARNING ACTIVE</strong>
+            <span id="dashAlertBannerBody">Water depth has crossed the configured alert threshold.</span>
+          </div>
         </div>
         <span id="dashAlertBannerTime" class="mono-text alert-banner-time">--:--:--</span>
       </div>
@@ -346,7 +384,10 @@
       <div class="telemetry-hero-grid" aria-live="polite">
         <!-- 1. Large Live Water-Depth Hero Indicator -->
         <article class="metric-card metric-card-hero">
-          <div class="metric-label">Live Water Depth</div>
+          <div class="metric-label-row">
+            <i data-lucide="waves" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+            <span class="metric-label">Live Water Depth</span>
+          </div>
           <div class="hero-depth-row">
             <span id="dashDepthCm" class="hero-depth-value">--</span>
             <span class="hero-depth-unit">cm</span>
@@ -361,7 +402,10 @@
 
         <!-- 2. Flood Status Level (Green NORMAL / Amber WARNING / Red CRITICAL) -->
         <article id="cardFloodStatus" class="metric-card status-card-unavailable">
-          <div class="metric-label">Flood Status</div>
+          <div class="metric-label-row">
+            <i data-lucide="shield-check" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+            <span class="metric-label">Flood Status</span>
+          </div>
           <div id="dashStatusValue" class="metric-status-text">UNAVAILABLE</div>
           <div id="dashStatusMeta" class="metric-subtext">
             Normal &lt; <span id="dashWarnValLabel">0.50</span> cm &middot; Warn &ge; 0.50 cm &middot; Crit &ge; <span id="dashCritValLabel">1.25</span> cm
@@ -370,7 +414,10 @@
 
         <!-- 3. Water-Level Trend -->
         <article class="metric-card">
-          <div class="metric-label">Water-Level Trend</div>
+          <div class="metric-label-row">
+            <i data-lucide="activity" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+            <span class="metric-label">Water-Level Trend</span>
+          </div>
           <div id="dashTrendValue" class="metric-trend-text">Unavailable</div>
           <div id="dashTrendMeta" class="metric-subtext">
             Waiting for timestamped measurements
@@ -380,7 +427,10 @@
 
         <!-- 4. Rate of Water-Level Change -->
         <article class="metric-card">
-          <div class="metric-label">Rate of Change</div>
+          <div class="metric-label-row">
+            <i data-lucide="gauge" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+            <span class="metric-label">Rate of Change</span>
+          </div>
           <div class="metric-number-row">
             <span id="dashRateValue" class="metric-value">--</span>
             <span class="metric-unit">cm/min</span>
@@ -392,7 +442,10 @@
 
         <!-- 5. Early-Warning Threshold ETA & Prediction Confidence -->
         <article class="metric-card metric-card-eta">
-          <div class="metric-label">Real-Time Flood Prediction</div>
+          <div class="metric-label-row">
+            <i data-lucide="timer" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+            <span class="metric-label">Real-Time Flood Prediction</span>
+          </div>
           <div class="eta-pair">
             <div class="eta-row">
               <span class="eta-key">Warning (<span id="dashEtaWarnThresh">0.50</span> cm)</span>
@@ -413,9 +466,14 @@
       <!-- Actionable Flood Warnings & Prototype Safety Guidance (NORMAL / WARNING / CRITICAL) -->
       <section id="actionableGuidanceCard" class="surface-card actionable-guidance-card dash-panel-gap" aria-labelledby="actionableGuidanceHeading" aria-live="polite">
         <div class="card-header-row">
-          <div>
-            <h2 id="actionableGuidanceHeading" class="card-title">Actionable Flood Safety Recommendations</h2>
-            <p id="actionableGuidanceSubtitle" class="card-subtitle">Status-based protective guidance updated automatically from live water-depth readings.</p>
+          <div class="card-title-with-icon">
+            <span class="card-icon-badge" aria-hidden="true">
+              <i data-lucide="shield-alert" class="ui-icon"></i>
+            </span>
+            <div>
+              <h2 id="actionableGuidanceHeading" class="card-title">Actionable Flood Safety Recommendations</h2>
+              <p id="actionableGuidanceSubtitle" class="card-subtitle">Status-based protective guidance updated automatically from live water-depth readings.</p>
+            </div>
           </div>
           <span id="actionableGuidanceTag" class="status-tag tag-neutral">UNAVAILABLE</span>
         </div>
@@ -774,47 +832,90 @@
           </div>
         </section>
 
-        <!-- Optional AI FloodGuard Assistant (Server-Side Gemini) -->
-        <section id="aiAssistantPanel" class="surface-card" aria-labelledby="aiAssistantHeading">
-          <div class="card-header-row" style="margin-bottom:10px;">
-            <div>
-              <h2 id="aiAssistantHeading" class="card-title">AI FloodGuard Assistant</h2>
-              <p class="card-subtitle">Optional plain-language explanations grounded in your current dashboard readings and NYC weather.</p>
+        <!-- Optional AI FloodGuard Assistant (Server-Side Gemini Conversational Chat) -->
+        <section id="aiAssistantPanel" class="surface-card ai-assistant-card" aria-labelledby="aiAssistantHeading">
+          <div class="ai-header-row">
+            <div class="ai-brand-lockup">
+              <div class="ai-gemini-avatar" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+                  <path d="M12 2C12.7 7.1 16.9 11.3 22 12C16.9 12.7 12.7 16.9 12 22C11.3 16.9 7.1 12.7 2 12C7.1 11.3 11.3 7.1 12 2Z" fill="currentColor"/>
+                </svg>
+              </div>
+              <div>
+                <h2 id="aiAssistantHeading" class="card-title">AI FloodGuard Assistant</h2>
+                <p class="card-subtitle">Grounded in your live ultrasonic telemetry, trend predictions, and NYC weather.</p>
+              </div>
             </div>
-            <span id="aiStatusTag" class="status-tag tag-neutral">Checking&hellip;</span>
+
+            <div class="ai-header-controls">
+              <span id="aiStatusTag" class="ai-status-badge ai-status-connecting" role="status">
+                <span class="ai-status-dot" aria-hidden="true"></span>
+                <span id="aiStatusTagText">Connecting</span>
+              </span>
+              <button type="button" id="btnExpandAssistant" class="btn btn-sm btn-outline ai-icon-btn" title="Expand or collapse conversation view" aria-expanded="false">
+                <i data-lucide="maximize-2" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+                <span id="btnExpandAssistantLabel">Expand</span>
+              </button>
+              <button type="button" id="btnClearAssistant" class="btn btn-sm btn-outline ai-icon-btn" title="Clear conversation history" disabled>
+                <i data-lucide="trash-2" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+                <span>Clear</span>
+              </button>
+            </div>
           </div>
 
           <div class="ai-disclaimer-line">
-            <strong>Informational Only:</strong> AI explanations are educational summaries and do not replace official NYC Emergency Management alerts.
+            <i data-lucide="info" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+            <span><strong>Informational Only:</strong> AI explanations summarize live readings and NYC weather; they do not replace official NYC Emergency Management alerts.</span>
           </div>
 
           <div class="ai-prompts-row" role="group" aria-label="Suggested FloodGuard questions">
-            <button type="button" class="ai-prompt-btn" data-question="Why is the flood risk increasing?">Why is the flood risk increasing?</button>
-            <button type="button" class="ai-prompt-btn" data-question="What happens when a storm drain becomes blocked?">What happens when a storm drain becomes blocked?</button>
-            <button type="button" class="ai-prompt-btn" data-question="What should pedestrians do during street flooding?">What should pedestrians do during street flooding?</button>
-            <button type="button" class="ai-prompt-btn" data-question="How does heavy rainfall affect NYC drainage systems?">How does heavy rainfall affect NYC drainage systems?</button>
+            <button type="button" class="ai-prompt-btn" data-question="Why is the flood risk increasing?">
+              <i data-lucide="trending-up" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+              <span>Why is the flood risk increasing?</span>
+            </button>
+            <button type="button" class="ai-prompt-btn" data-question="What happens when a storm drain becomes blocked?">
+              <i data-lucide="alert-triangle" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+              <span>What happens when a storm drain becomes blocked?</span>
+            </button>
+            <button type="button" class="ai-prompt-btn" data-question="What should pedestrians do during street flooding?">
+              <i data-lucide="shield-alert" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+              <span>What should pedestrians do during street flooding?</span>
+            </button>
+            <button type="button" class="ai-prompt-btn" data-question="How does heavy rainfall affect NYC drainage systems?">
+              <i data-lucide="cloud-rain" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+              <span>How does heavy rainfall affect NYC drainage systems?</span>
+            </button>
+          </div>
+
+          <div id="aiErrorNotice" class="inline-notice notice-warn hidden" style="margin-top:0;margin-bottom:10px;"></div>
+
+          <div id="aiMessagesBox" class="ai-chat-thread" aria-live="polite" aria-label="AI FloodGuard Assistant conversation">
+            <div class="ai-empty-state">
+              <div class="ai-empty-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+                  <path d="M12 2C12.7 7.1 16.9 11.3 22 12C16.9 12.7 12.7 16.9 12 22C11.3 16.9 7.1 12.7 2 12C7.1 11.3 11.3 7.1 12 2Z" fill="currentColor"/>
+                </svg>
+              </div>
+              <p class="ai-empty-title">Ready to analyze your live flood data</p>
+              <p class="ai-empty-desc">Choose a suggested question above or ask about water depth, blocked storm drains, rainfall outlook, or resident safety guidance.</p>
+            </div>
           </div>
 
           <form id="aiAssistantForm" class="ai-input-form">
             <input
               type="text"
               id="aiQuestionInput"
-              class="form-control"
+              class="form-control ai-chat-input"
               maxlength="600"
-              placeholder="Ask about current water readings, drain blockages, or NYC flood safety..."
+              placeholder="Ask about live water depth, drain blockages, or NYC flood safety..."
               aria-label="Ask AI FloodGuard Assistant"
               required
             />
-            <button type="submit" id="btnAskAssistant" class="btn btn-primary">Ask Assistant</button>
+            <button type="submit" id="btnAskAssistant" class="btn btn-primary ai-send-btn">
+              <i data-lucide="send" class="ui-icon ui-icon-sm" aria-hidden="true"></i>
+              <span>Ask</span>
+            </button>
           </form>
-
-          <div id="aiErrorNotice" class="inline-notice notice-warn hidden" style="margin-top:10px;margin-bottom:0;"></div>
-
-          <div id="aiMessagesBox" class="ai-messages-box" aria-live="polite">
-            <div class="ai-empty-msg">
-              Select a suggested question above or type your own to get a plain-language explanation powered by server-side Gemini.
-            </div>
-          </div>
         </section>
       </div>
 

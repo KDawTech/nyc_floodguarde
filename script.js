@@ -63,7 +63,68 @@ import {
   addValidationComparison,
   summarizeValidationResults
 } from './measurementValidation.js';
+import { renderAssistantMarkdown } from './markdownRenderer.js';
+import {
+  createIcons,
+  Usb,
+  RotateCcw,
+  Unplug,
+  PlayCircle,
+  Monitor,
+  Minimize2,
+  Maximize2,
+  AlertOctagon,
+  Waves,
+  ShieldCheck,
+  Activity,
+  Gauge,
+  Timer,
+  ShieldAlert,
+  Trash2,
+  Info,
+  TrendingUp,
+  AlertTriangle,
+  CloudRain,
+  Send,
+  Copy,
+  Check,
+  User
+} from 'lucide';
 import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
+
+const LUCIDE_ICONS = {
+  Usb,
+  RotateCcw,
+  Unplug,
+  PlayCircle,
+  Monitor,
+  Minimize2,
+  Maximize2,
+  AlertOctagon,
+  Waves,
+  ShieldCheck,
+  Activity,
+  Gauge,
+  Timer,
+  ShieldAlert,
+  Trash2,
+  Info,
+  TrendingUp,
+  AlertTriangle,
+  CloudRain,
+  Send,
+  Copy,
+  Check,
+  User
+};
+
+function refreshLucideIcons() {
+  try {
+    createIcons({ icons: LUCIDE_ICONS });
+  } catch {
+    // Non-fatal if icons cannot render in non-DOM test environment
+  }
+}
 
 (function () {
   'use strict';
@@ -283,12 +344,26 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
   const aiAssistantState = {
     statusChecked: false,
     available: false,
-    statusLabel: 'Checking…',
+    statusState: 'connecting', // 'connecting' | 'ready' | 'processing' | 'offline'
+    statusLabel: 'Connecting',
     statusNote: '',
     loading: false,
+    pendingQuestion: '',
+    pendingAt: '',
+    expanded: false,
+    copiedId: null,
     error: '',
-    messages: []
+    messages: [] // chronological: oldest -> newest
   };
+
+  /**
+   * Optional Fullscreen Presentation Mode state (UI-only emphasis of live telemetry, predictions & alerts).
+   */
+  const presentationState = {
+    active: false,
+    clockTimerId: null
+  };
+  let lastDisplayedDepthText = '--';
 
   /**
    * Existing Supabase demo tables (`sensors` & `water_readings`, read-only).
@@ -1436,25 +1511,50 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     const isConnLost = telemetryState.streamHealth === 'CONNECTION_LOST';
     const isStale = telemetryState.streamHealth === 'STALE';
 
+    const presMirror = document.getElementById('presSourceMirror');
     if (sourceBadge) {
       if (telemetryState.mode === 'LIVE') {
         sourceBadge.textContent = 'LIVE MODE · ARDUINO USB';
         sourceBadge.className = 'source-indicator source-live';
+        if (presMirror) {
+          presMirror.textContent = 'LIVE ARDUINO USB';
+          presMirror.className = 'status-tag tag-normal';
+        }
       } else if (telemetryState.mode === 'SIMULATED') {
         sourceBadge.textContent = 'DEMO MODE · SIMULATED';
         sourceBadge.className = 'source-indicator source-simulated';
+        if (presMirror) {
+          presMirror.textContent = 'DEMO MODE (SIMULATED)';
+          presMirror.className = 'status-tag tag-warn';
+        }
       } else if (isConnLost) {
         sourceBadge.textContent = 'CONNECTION LOST';
         sourceBadge.className = 'source-indicator source-disconnected';
+        if (presMirror) {
+          presMirror.textContent = 'CONNECTION LOST';
+          presMirror.className = 'status-tag tag-critical';
+        }
       } else if (isStale) {
         sourceBadge.textContent = 'STALE DATA · NO SIGNAL';
         sourceBadge.className = 'source-indicator source-stale';
+        if (presMirror) {
+          presMirror.textContent = 'STALE DATA';
+          presMirror.className = 'status-tag tag-warn';
+        }
       } else if (arduinoClient.connected) {
         sourceBadge.textContent = 'USB CONNECTED · WAITING';
         sourceBadge.className = 'source-indicator source-unavailable';
+        if (presMirror) {
+          presMirror.textContent = 'USB WAITING';
+          presMirror.className = 'status-tag tag-neutral';
+        }
       } else {
         sourceBadge.textContent = 'OFFLINE / UNAVAILABLE';
         sourceBadge.className = 'source-indicator source-unavailable';
+        if (presMirror) {
+          presMirror.textContent = 'OFFLINE';
+          presMirror.className = 'status-tag tag-neutral';
+        }
       }
     }
 
@@ -1531,8 +1631,13 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
     if (btnSimToggle) {
       btnSimToggle.disabled = arduinoClient.connected;
-      btnSimToggle.textContent =
-        telemetryState.mode === 'SIMULATED' ? 'Stop Demo Mode' : 'Start Demo Mode';
+      const simLabel = telemetryState.mode === 'SIMULATED' ? 'Stop Demo Mode' : 'Start Demo Mode';
+      const span = btnSimToggle.querySelector('span');
+      if (span) {
+        span.textContent = simLabel;
+      } else {
+        btnSimToggle.textContent = simLabel;
+      }
     }
 
     if (simStrip) {
@@ -1645,10 +1750,18 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     const rawLineEl = document.getElementById('dashRawReadingLine');
 
     if (depthEl) {
-      depthEl.textContent =
+      const nextDepthText =
         analysis.available && analysis.filteredDepthCm != null
           ? analysis.filteredDepthCm.toFixed(2)
           : '--';
+      const valueChanged = nextDepthText !== lastDisplayedDepthText && nextDepthText !== '--';
+      depthEl.textContent = nextDepthText;
+      if (valueChanged) {
+        depthEl.classList.remove('telemetry-tick-pulse');
+        void depthEl.offsetWidth;
+        depthEl.classList.add('telemetry-tick-pulse');
+      }
+      lastDisplayedDepthText = nextDepthText;
     }
 
     if (depthFormulaEl) {
@@ -2460,6 +2573,21 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     const maxY = Math.max(cfg.critThresholdCm * 1.5, maxPoint * 1.25, 2.0);
     const yDecimals = maxY <= 5 ? 2 : maxY <= 15 ? 1 : 0;
 
+    // Soft risk-zone shading above Warning and Critical thresholds
+    const yWarn = pad.top + plotH - (cfg.warnThresholdCm / maxY) * plotH;
+    const yCrit = pad.top + plotH - (cfg.critThresholdCm / maxY) * plotH;
+
+    ctx.save();
+    if (yCrit > pad.top) {
+      ctx.fillStyle = 'rgba(220, 38, 38, 0.045)';
+      ctx.fillRect(pad.left, pad.top, plotW, Math.max(0, yCrit - pad.top));
+    }
+    if (yWarn > yCrit) {
+      ctx.fillStyle = 'rgba(217, 119, 6, 0.04)';
+      ctx.fillRect(pad.left, Math.max(pad.top, yCrit), plotW, Math.max(0, yWarn - Math.max(pad.top, yCrit)));
+    }
+    ctx.restore();
+
     // Horizontal Gridlines
     ctx.strokeStyle = '#E2E8F0';
     ctx.lineWidth = 1;
@@ -2476,7 +2604,6 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     }
 
     // Warning Threshold Dashed Line (Amber)
-    const yWarn = pad.top + plotH - (cfg.warnThresholdCm / maxY) * plotH;
     ctx.save();
     ctx.strokeStyle = '#D97706';
     ctx.lineWidth = 1.5;
@@ -2486,14 +2613,14 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     ctx.lineTo(pad.left + plotW, yWarn);
     ctx.stroke();
     ctx.fillStyle = '#B45309';
+    ctx.font = '600 11px "JetBrains Mono", monospace';
     ctx.fillText(
-      `Warning (${cfg.warnThresholdCm.toFixed(2)} cm)`,
+      `Warning ${cfg.warnThresholdCm.toFixed(2)} cm`,
       pad.left + 8,
       Math.max(pad.top + 12, yWarn - 6)
     );
 
     // Critical Threshold Dashed Line (Red)
-    const yCrit = pad.top + plotH - (cfg.critThresholdCm / maxY) * plotH;
     ctx.strokeStyle = '#DC2626';
     ctx.beginPath();
     ctx.moveTo(pad.left, yCrit);
@@ -2501,7 +2628,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     ctx.stroke();
     ctx.fillStyle = '#B91C1C';
     ctx.fillText(
-      `Critical (${cfg.critThresholdCm.toFixed(2)} cm)`,
+      `Critical ${cfg.critThresholdCm.toFixed(2)} cm`,
       pad.left + 8,
       Math.max(pad.top + 12, yCrit - 6)
     );
@@ -2518,25 +2645,31 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       return { x, y, pt };
     });
 
-    // Subtle area fill under depth curve
+    // Refined vertical gradient area fill under depth curve
     ctx.save();
+    const areaGrad = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+    if (telemetryState.mode === 'LIVE') {
+      areaGrad.addColorStop(0, 'rgba(8, 145, 178, 0.24)');
+      areaGrad.addColorStop(1, 'rgba(8, 145, 178, 0.02)');
+    } else {
+      areaGrad.addColorStop(0, 'rgba(217, 119, 6, 0.20)');
+      areaGrad.addColorStop(1, 'rgba(217, 119, 6, 0.02)');
+    }
     ctx.beginPath();
     ctx.moveTo(coords[0].x, pad.top + plotH);
     coords.forEach((c) => ctx.lineTo(c.x, c.y));
     ctx.lineTo(coords[coords.length - 1].x, pad.top + plotH);
     ctx.closePath();
-    ctx.fillStyle =
-      telemetryState.mode === 'LIVE'
-        ? 'rgba(8, 145, 178, 0.14)'
-        : 'rgba(217, 119, 6, 0.13)';
+    ctx.fillStyle = areaGrad;
     ctx.fill();
     ctx.restore();
 
     // Water-depth line
     ctx.save();
     ctx.strokeStyle = telemetryState.mode === 'LIVE' ? '#0891B2' : '#D97706';
-    ctx.lineWidth = 2.4;
+    ctx.lineWidth = 2.6;
     ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
     ctx.beginPath();
     coords.forEach((c, idx) => {
       if (idx === 0) ctx.moveTo(c.x, c.y);
@@ -2544,17 +2677,31 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     });
     ctx.stroke();
 
-    // Point markers
+    // Point markers with crisp live halo on latest reading
     coords.forEach((c, idx) => {
       const isLast = idx === coords.length - 1;
+      if (isLast) {
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 9, 0, Math.PI * 2);
+        ctx.fillStyle =
+          telemetryState.mode === 'LIVE'
+            ? 'rgba(8, 145, 178, 0.20)'
+            : 'rgba(217, 119, 6, 0.20)';
+        ctx.fill();
+      }
       ctx.beginPath();
-      ctx.arc(c.x, c.y, isLast ? 4.8 : 2.6, 0, Math.PI * 2);
+      ctx.arc(c.x, c.y, isLast ? 4.8 : 2.5, 0, Math.PI * 2);
       ctx.fillStyle = isLast
         ? '#0A192F'
         : telemetryState.mode === 'LIVE'
         ? '#0891B2'
         : '#D97706';
       ctx.fill();
+      if (isLast) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.stroke();
+      }
     });
     ctx.restore();
 
@@ -2815,7 +2962,11 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
   }
 
   async function checkAiAssistantStatus() {
-    aiAssistantState.statusChecked = true;
+    aiAssistantState.statusChecked = false;
+    aiAssistantState.statusState = 'connecting';
+    aiAssistantState.statusLabel = 'Connecting';
+    renderAiAssistantPanel();
+
     const apiBase = getAssistantApiBase();
     const statusUrl = buildAssistantEndpoint('/api/assistant/status');
 
@@ -2825,19 +2976,21 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         { headers: { Accept: 'application/json' } },
         20000
       );
+      aiAssistantState.statusChecked = true;
       const contentType = resp.headers.get('content-type') || '';
       if (!resp.ok || !contentType.includes('application/json')) {
         aiAssistantState.available = false;
+        aiAssistantState.statusState = 'offline';
         if (!apiBase) {
-          aiAssistantState.statusLabel = 'Backend URL Not Set';
+          aiAssistantState.statusLabel = 'Offline';
           aiAssistantState.statusNote =
             'GitHub Pages serves static files only. Deploy the Node/Express backend on Render and set the VITE_ASSISTANT_API_URL repository variable to enable the AI Assistant. Rule-based FloodGuard Risk Intelligence remains fully active.';
         } else if (resp.status === 403) {
-          aiAssistantState.statusLabel = 'CORS Blocked';
+          aiAssistantState.statusLabel = 'Offline (CORS)';
           aiAssistantState.statusNote =
             'The configured AI backend rejected this site origin. Verify ALLOWED_ORIGINS on your Render backend includes your GitHub Pages origin (e.g. https://kdawtech.github.io).';
         } else {
-          aiAssistantState.statusLabel = 'Backend Unavailable';
+          aiAssistantState.statusLabel = 'Offline';
           aiAssistantState.statusNote = `The configured AI backend returned HTTP ${resp.status}. Rule-based FloodGuard Risk Intelligence remains fully active.`;
         }
         renderAiAssistantPanel();
@@ -2845,12 +2998,15 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       }
       const data = await resp.json();
       aiAssistantState.available = Boolean(data.available);
-      aiAssistantState.statusLabel = data.available ? 'Gemini Ready' : 'API Key Needed';
+      aiAssistantState.statusState = data.available ? 'ready' : 'offline';
+      aiAssistantState.statusLabel = data.available ? 'Gemini Ready' : 'Offline';
       aiAssistantState.statusNote = data.note || '';
     } catch (err) {
+      aiAssistantState.statusChecked = true;
       aiAssistantState.available = false;
       const isTimeout = err && err.name === 'AbortError';
-      aiAssistantState.statusLabel = apiBase ? 'Backend Waking / Offline' : 'Backend Unavailable';
+      aiAssistantState.statusState = isTimeout && apiBase ? 'connecting' : 'offline';
+      aiAssistantState.statusLabel = isTimeout && apiBase ? 'Connecting' : 'Offline';
       aiAssistantState.statusNote = apiBase
         ? isTimeout
           ? 'The Render backend is waking up from standby (free-tier cold start). You can try asking a question in a few seconds.'
@@ -2911,6 +3067,10 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
     const endpoint = buildAssistantEndpoint('/api/assistant');
 
     aiAssistantState.loading = true;
+    aiAssistantState.pendingQuestion = question;
+    aiAssistantState.pendingAt = new Date().toISOString();
+    aiAssistantState.statusState = 'processing';
+    aiAssistantState.statusLabel = 'Processing';
     aiAssistantState.error = '';
     renderAiAssistantPanel();
 
@@ -2942,73 +3102,246 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         throw new Error(data.error || `AI Assistant returned HTTP ${resp.status}.`);
       }
 
-      aiAssistantState.messages.unshift({
+      aiAssistantState.messages.push({
+        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         question,
+        askedAt: aiAssistantState.pendingAt,
         answer: data.answer,
         model: data.model || 'gemini-4-hydrogen',
         generatedAt: data.generatedAt || new Date().toISOString()
       });
-      if (aiAssistantState.messages.length > 10) {
-        aiAssistantState.messages = aiAssistantState.messages.slice(0, 10);
+      if (aiAssistantState.messages.length > 20) {
+        aiAssistantState.messages = aiAssistantState.messages.slice(-20);
       }
       aiAssistantState.available = true;
+      aiAssistantState.statusState = 'ready';
       aiAssistantState.statusLabel = 'Gemini Ready';
       aiAssistantState.statusNote = '';
     } catch (err) {
       if (err && err.name === 'AbortError') {
         aiAssistantState.error =
           'The request timed out while waiting for the AI backend (Render free instances can take ~30 seconds to wake up). Please try again.';
+        aiAssistantState.statusState = 'offline';
+        aiAssistantState.statusLabel = 'Offline';
       } else {
         aiAssistantState.error =
           err instanceof Error ? err.message : 'Unable to reach AI FloodGuard Assistant.';
+        aiAssistantState.statusState = aiAssistantState.available ? 'ready' : 'offline';
+        aiAssistantState.statusLabel = aiAssistantState.available ? 'Gemini Ready' : 'Offline';
       }
     } finally {
       aiAssistantState.loading = false;
+      aiAssistantState.pendingQuestion = '';
+      aiAssistantState.pendingAt = '';
       renderAiAssistantPanel();
     }
   }
 
+  function formatChatTime(isoString) {
+    try {
+      return new Date(isoString || Date.now()).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch {
+      return '';
+    }
+  }
+
   function renderAiAssistantPanel() {
+    const panel = document.getElementById('aiAssistantPanel');
     const statusTag = document.getElementById('aiStatusTag');
+    const statusTagText = document.getElementById('aiStatusTagText');
     const errEl = document.getElementById('aiErrorNotice');
     const box = document.getElementById('aiMessagesBox');
     const askBtn = document.getElementById('btnAskAssistant');
+    const clearBtn = document.getElementById('btnClearAssistant');
+    const expandBtn = document.getElementById('btnExpandAssistant');
+    const expandLabel = document.getElementById('btnExpandAssistantLabel');
 
-    if (statusTag) {
-      statusTag.textContent = aiAssistantState.statusLabel;
-      statusTag.className = aiAssistantState.available
-        ? 'status-tag tag-normal'
-        : 'status-tag tag-neutral';
+    if (panel) {
+      panel.classList.toggle('ai-assistant-expanded', aiAssistantState.expanded);
+    }
+    if (expandBtn) {
+      expandBtn.setAttribute('aria-expanded', aiAssistantState.expanded ? 'true' : 'false');
+    }
+    if (expandLabel) {
+      expandLabel.textContent = aiAssistantState.expanded ? 'Collapse' : 'Expand';
     }
 
-    setButtonBusy(askBtn, 'Thinking…', aiAssistantState.loading);
+    const activeState = aiAssistantState.loading ? 'processing' : aiAssistantState.statusState;
+    const activeLabel = aiAssistantState.loading ? 'Processing' : aiAssistantState.statusLabel;
+
+    if (statusTag) {
+      statusTag.className = `ai-status-badge ai-status-${activeState}`;
+    }
+    if (statusTagText) {
+      statusTagText.textContent = activeLabel;
+    } else if (statusTag) {
+      statusTag.textContent = activeLabel;
+    }
+
+    if (askBtn) {
+      askBtn.disabled = aiAssistantState.loading;
+      const span = askBtn.querySelector('span');
+      if (span) {
+        span.textContent = aiAssistantState.loading ? 'Processing…' : 'Ask';
+      } else {
+        askBtn.textContent = aiAssistantState.loading ? 'Processing…' : 'Ask';
+      }
+    }
+    if (clearBtn) {
+      clearBtn.disabled = aiAssistantState.loading || aiAssistantState.messages.length === 0;
+    }
+
     document.querySelectorAll('.ai-prompt-btn').forEach((b) => {
       b.disabled = aiAssistantState.loading;
     });
 
     if (errEl) {
-      const showMsg = aiAssistantState.error || (!aiAssistantState.available && aiAssistantState.statusChecked ? aiAssistantState.statusNote : '');
+      const showMsg =
+        aiAssistantState.error ||
+        (!aiAssistantState.available && aiAssistantState.statusChecked ? aiAssistantState.statusNote : '');
       errEl.classList.toggle('hidden', !showMsg);
       errEl.textContent = showMsg;
     }
 
     if (!box) return;
-    if (aiAssistantState.messages.length === 0) {
-      box.innerHTML = `<div class="ai-empty-msg">Select a suggested question above or type your own to get a plain-language explanation powered by server-side Gemini.</div>`;
+
+    const geminiSvg = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true"><path d="M12 2C12.7 7.1 16.9 11.3 22 12C16.9 12.7 12.7 16.9 12 22C11.3 16.9 7.1 12.7 2 12C7.1 11.3 11.3 7.1 12 2Z" fill="currentColor"/></svg>`;
+
+    if (aiAssistantState.messages.length === 0 && !aiAssistantState.loading) {
+      box.innerHTML = `
+        <div class="ai-empty-state">
+          <div class="ai-empty-icon" aria-hidden="true">${geminiSvg}</div>
+          <p class="ai-empty-title">Ready to analyze your live flood data</p>
+          <p class="ai-empty-desc">Choose a suggested question above or ask about water depth, blocked storm drains, rainfall outlook, or resident safety guidance.</p>
+        </div>
+      `;
       return;
     }
 
-    box.innerHTML = aiAssistantState.messages
-      .map(
-        (m) => `
-        <article class="ai-msg-item">
-          <div class="ai-msg-q">Q: ${escapeHtml(m.question)}</div>
-          <div class="ai-msg-a">${escapeHtml(m.answer)}</div>
-          <div class="ai-msg-meta">Informational Only · Server-Side Gemini (${escapeHtml(m.model)}) · ${escapeHtml(new Date(m.generatedAt).toLocaleTimeString())}</div>
-        </article>
-      `
-      )
+    const turnsHtml = aiAssistantState.messages
+      .map((m) => {
+        const renderedAnswer = renderAssistantMarkdown(m.answer);
+        const isCopied = aiAssistantState.copiedId === m.id;
+        return `
+          <div class="chat-turn" data-msg-id="${escapeHtml(m.id)}">
+            <div class="chat-row chat-row-user">
+              <div class="chat-bubble chat-bubble-user">
+                <div class="chat-bubble-head">
+                  <span class="chat-sender">You</span>
+                  <span class="chat-time">${escapeHtml(formatChatTime(m.askedAt || m.generatedAt))}</span>
+                </div>
+                <div class="chat-user-text">${escapeHtml(m.question)}</div>
+              </div>
+            </div>
+
+            <div class="chat-row chat-row-assistant">
+              <div class="chat-avatar chat-avatar-gemini" aria-hidden="true">${geminiSvg}</div>
+              <div class="chat-bubble chat-bubble-assistant">
+                <div class="chat-bubble-head">
+                  <span class="chat-sender">FloodGuard Gemini Assistant</span>
+                  <div class="chat-bubble-tools">
+                    <span class="chat-time">${escapeHtml(formatChatTime(m.generatedAt))}</span>
+                    <button type="button" class="chat-copy-btn${isCopied ? ' is-copied' : ''}" data-copy-msg="${escapeHtml(m.id)}" title="Copy response text">
+                      <i data-lucide="${isCopied ? 'check' : 'copy'}" class="ui-icon ui-icon-xs" aria-hidden="true"></i>
+                      <span>${isCopied ? 'Copied' : 'Copy'}</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="chat-markdown-body">${renderedAnswer}</div>
+                <div class="chat-bubble-foot">
+                  <span>Informational Only</span>
+                  <span aria-hidden="true">&middot;</span>
+                  <span>Server-Side Gemini (${escapeHtml(m.model)})</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+      })
       .join('');
+
+    const pendingHtml = aiAssistantState.loading
+      ? `
+        <div class="chat-turn chat-turn-pending">
+          <div class="chat-row chat-row-user">
+            <div class="chat-bubble chat-bubble-user">
+              <div class="chat-bubble-head">
+                <span class="chat-sender">You</span>
+                <span class="chat-time">${escapeHtml(formatChatTime(aiAssistantState.pendingAt))}</span>
+              </div>
+              <div class="chat-user-text">${escapeHtml(aiAssistantState.pendingQuestion)}</div>
+            </div>
+          </div>
+          <div class="chat-row chat-row-assistant">
+            <div class="chat-avatar chat-avatar-gemini" aria-hidden="true">${geminiSvg}</div>
+            <div class="chat-bubble chat-bubble-assistant chat-bubble-typing">
+              <div class="typing-indicator" role="status" aria-label="Gemini is analyzing live flood telemetry">
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+                <span class="typing-label">Analyzing live telemetry &amp; NYC weather&hellip;</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      `
+      : '';
+
+    box.innerHTML = turnsHtml + pendingHtml;
+    refreshLucideIcons();
+    box.scrollTop = box.scrollHeight;
+  }
+
+  /* --------------------------------------------------------------------------
+   * 6D. FULLSCREEN PRESENTATION MODE CONTROLLER (UI-ONLY EMPHASIS)
+   * -------------------------------------------------------------------------- */
+  function updatePresentationClock() {
+    const el = document.getElementById('presClockText');
+    if (el) {
+      el.textContent = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+    }
+  }
+
+  function setPresentationMode(enable) {
+    const next = Boolean(enable);
+    presentationState.active = next;
+    document.body.classList.toggle('presentation-mode', next);
+    const bar = document.getElementById('presentationTopBar');
+    if (bar) bar.classList.toggle('hidden', !next);
+
+    if (next) {
+      updatePresentationClock();
+      if (presentationState.clockTimerId) clearInterval(presentationState.clockTimerId);
+      presentationState.clockTimerId = setInterval(updatePresentationClock, 1000);
+      if (document.documentElement.requestFullscreen && !document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {
+          // Graceful fallback to full-viewport CSS mode inside sandboxed iframes
+        });
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+      if (presentationState.clockTimerId) {
+        clearInterval(presentationState.clockTimerId);
+        presentationState.clockTimerId = null;
+      }
+      if (document.fullscreenElement && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+
+    // Re-scale charts cleanly after layout change
+    setTimeout(() => {
+      drawWaterHistoryChart();
+      drawWeatherRainChart();
+      refreshLucideIcons();
+    }, 80);
   }
 
   /* --------------------------------------------------------------------------
@@ -4106,7 +4439,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
       loadLiveNycWeather(true);
     });
 
-    // AI FloodGuard Assistant Form & Suggested Questions
+    // AI FloodGuard Assistant Form, Suggested Questions, Copy, Clear & Expand Controls
     document.getElementById('aiAssistantForm')?.addEventListener('submit', (e) => {
       e.preventDefault();
       const input = document.getElementById('aiQuestionInput');
@@ -4121,6 +4454,70 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
         const q = btn.getAttribute('data-question');
         if (q) askFloodGuardAssistant(q);
       });
+    });
+
+    document.getElementById('btnExpandAssistant')?.addEventListener('click', () => {
+      aiAssistantState.expanded = !aiAssistantState.expanded;
+      renderAiAssistantPanel();
+    });
+
+    document.getElementById('btnClearAssistant')?.addEventListener('click', () => {
+      aiAssistantState.messages = [];
+      aiAssistantState.error = '';
+      aiAssistantState.copiedId = null;
+      renderAiAssistantPanel();
+      showToast('Conversation cleared.', 'NORMAL');
+    });
+
+    document.getElementById('aiMessagesBox')?.addEventListener('click', async (e) => {
+      const copyBtn = e.target.closest('.chat-copy-btn');
+      if (!copyBtn) return;
+      const msgId = copyBtn.getAttribute('data-copy-msg');
+      const target = aiAssistantState.messages.find((m) => m.id === msgId);
+      if (!target) return;
+      try {
+        await navigator.clipboard.writeText(target.answer);
+        aiAssistantState.copiedId = msgId;
+        renderAiAssistantPanel();
+        showToast('Assistant response copied to clipboard.', 'NORMAL');
+        setTimeout(() => {
+          if (aiAssistantState.copiedId === msgId) {
+            aiAssistantState.copiedId = null;
+            renderAiAssistantPanel();
+          }
+        }, 2000);
+      } catch {
+        showToast('Clipboard permission unavailable in this browser context.', 'WARNING');
+      }
+    });
+
+    // Optional Fullscreen Presentation Mode Controls
+    document.getElementById('btnTogglePresentationMode')?.addEventListener('click', () => {
+      setPresentationMode(!presentationState.active);
+    });
+    document.getElementById('btnExitPresentationMode')?.addEventListener('click', () => {
+      setPresentationMode(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && presentationState.active) {
+        setPresentationMode(false);
+      }
+    });
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement && presentationState.active) {
+        // Keep user control synchronized when exiting native fullscreen via browser Esc
+        presentationState.active = false;
+        document.body.classList.remove('presentation-mode');
+        document.getElementById('presentationTopBar')?.classList.add('hidden');
+        if (presentationState.clockTimerId) {
+          clearInterval(presentationState.clockTimerId);
+          presentationState.clockTimerId = null;
+        }
+        setTimeout(() => {
+          drawWaterHistoryChart();
+          drawWeatherRainChart();
+        }, 80);
+      }
     });
 
     // Chart hover inspection (distinguishing filtered vs raw values consistently)
@@ -4597,6 +4994,7 @@ import arduinoSketchSource from './arduino/nyc_floodguard_giga.ino?raw';
 
   function init() {
     bindEvents();
+    refreshLucideIcons();
     recalculateTelemetryAndRender();
     startLiveStaleWatchdog();
     initAuthentication();
